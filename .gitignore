@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Віртуальне середовище
+venv/
+env/
+.env/
+
+# Секрети та ключі
+google_creds.json
+.env
+*.key
+*.pem
+
+# База даних
+leads.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Логи
+*.log
+logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
