@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Request
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram.error import Forbidden, RetryAfter, TimedOut, NetworkError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from config import (
@@ -14,7 +15,7 @@ from config import (
     SCHEDULER_TICK, MANAGERS,
 )
 from db import (
-    init_db, q, get_lead, get_taken, get_all_taken, take_lead,
+    init_db, q, get_lead, get_taken, get_all_taken, get_all_availability, take_lead,
     get_msg_id, save_msg, get_all_msgs,
     mark_skipped, get_skipped,
     is_available, set_availability,
@@ -71,16 +72,17 @@ def build_keyboard(lead_id: str) -> InlineKeyboardMarkup:
 
 
 def sorted_queue(exclude: list[str] = None) -> list[str]:
-    managers  = fetch_managers()
-    month     = month_key()
-    exclude   = set(exclude or [])
-    taken_map = get_all_taken(month)  # один запит замість N
+    managers   = fetch_managers()
+    month      = month_key()
+    exclude    = set(exclude or [])
+    taken_map  = get_all_taken(month)
+    avail_map  = get_all_availability()
 
     queue = []
     for tg_id, info in managers.items():
         if tg_id in exclude:
             continue
-        if not is_available(tg_id):
+        if not avail_map.get(tg_id, False):
             continue
         taken     = taken_map.get(tg_id, 0)
         max_leads = info['max_leads']
@@ -94,14 +96,51 @@ def sorted_queue(exclude: list[str] = None) -> list[str]:
 
 # ─── ВІДПРАВКА / РЕДАГУВАННЯ ─────────────────────────────────────────────────
 
+async def _deactivate_blocked(manager_id: str):
+    """Деактивує менеджера, що заблокував бота, та сповіщає адміна."""
+    set_availability(manager_id, False)
+    name = MANAGERS_BY_ID.get(manager_id, manager_id)
+    logger.warning(f"{name} ({manager_id}) заблокував бота — деактивовано")
+    if ADMIN_ID:
+        try:
+            await _app.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"🚫 <b>{name}</b> заблокував бота — автоматично виведено з черги",
+                parse_mode='HTML',
+            )
+        except Exception:
+            pass
+
+
+async def _tg_retry(coro_fn, manager_id: str):
+    """3 спроби з exponential backoff (1s → 2s). Forbidden → деактивація і raise."""
+    last_err: Exception = None
+    for attempt in range(3):
+        try:
+            return await coro_fn()
+        except Forbidden:
+            await _deactivate_blocked(manager_id)
+            raise
+        except RetryAfter as e:
+            last_err = e
+            await asyncio.sleep(e.retry_after + 1)
+        except (TimedOut, NetworkError) as e:
+            last_err = e
+            if attempt < 2:
+                await asyncio.sleep(2 ** attempt)
+    raise last_err
+
+
 async def send_to(manager_id: str, lead_id: str, text: str) -> int:
-    bot: Bot = _app.bot
     try:
-        msg = await bot.send_message(
-            chat_id=manager_id,
-            text=text,
-            reply_markup=build_keyboard(lead_id),
-            parse_mode='HTML',
+        msg = await _tg_retry(
+            lambda: _app.bot.send_message(
+                chat_id=manager_id,
+                text=text,
+                reply_markup=build_keyboard(lead_id),
+                parse_mode='HTML',
+            ),
+            manager_id,
         )
     except Exception as e:
         logger.error(f"send_to {manager_id}: {e}")
@@ -123,6 +162,8 @@ async def edit_msg(manager_id: str, lead_id: str, text: str, keep_buttons: bool 
             reply_markup=build_keyboard(lead_id) if keep_buttons else None,
             parse_mode='HTML',
         )
+    except Forbidden:
+        await _deactivate_blocked(manager_id)
     except Exception as e:
         logger.debug(f"edit_msg {manager_id}: {e}")
 
@@ -652,6 +693,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await remove_from_others(lead_id, except_id=manager_id,
                                      note=f"✅ Заявку взяв(ла) <b>{mgr_name}</b>")
             logger.info(f"Заявка {lead_id} взята {mgr_name} ({manager_id})")
+            if ADMIN_ID:
+                try:
+                    await _app.bot.send_message(
+                        chat_id=ADMIN_ID,
+                        text=f"✅ <b>{mgr_name}</b> взяв(ла) заявку в роботу\n\n{lead['title']}",
+                        parse_mode='HTML',
+                    )
+                except Exception:
+                    pass
 
         elif action in ('skip', 's'):
             mark_skipped(lead_id, manager_id)

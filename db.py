@@ -1,16 +1,48 @@
 import logging
 import sqlite3
 from datetime import datetime
+from queue import Full, Queue
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = 'leads.db'
+DB_PATH    = 'leads.db'
+_pool: Optional[Queue] = None
+_POOL_SIZE = 5
 
 
 def init_db():
+    _init_pool()
     _create_tables()
     _migrate()
+
+
+def _make_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def _init_pool():
+    global _pool
+    _pool = Queue(maxsize=_POOL_SIZE)
+    for _ in range(_POOL_SIZE):
+        _pool.put(_make_conn())
+
+
+def _get_conn() -> sqlite3.Connection:
+    try:
+        return _pool.get_nowait()
+    except Exception:
+        return _make_conn()
+
+
+def _release_conn(conn: sqlite3.Connection):
+    try:
+        _pool.put_nowait(conn)
+    except Full:
+        conn.close()
 
 
 def _create_tables():
@@ -67,27 +99,24 @@ def _migrate():
             try:
                 c.execute(sql)
             except sqlite3.OperationalError:
-                pass  # колонка вже існує
-
-
-def _conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+                pass
 
 
 def q(sql: str, params=(), fetch: str = None):
+    conn = _get_conn()
     try:
-        with _conn() as conn:
-            cur = conn.execute(sql, params)
-            if fetch == 'one':
-                return cur.fetchone()
-            if fetch == 'all':
-                return cur.fetchall()
-            return cur
+        cur = conn.execute(sql, params)
+        conn.commit()
+        if fetch == 'one':
+            return cur.fetchone()
+        if fetch == 'all':
+            return cur.fetchall()
     except sqlite3.Error as e:
+        conn.rollback()
         logger.error(f"DB помилка | SQL: {sql[:80]} | Params: {params} | Error: {e}")
         raise
+    finally:
+        _release_conn(conn)
 
 
 def get_lead(lead_id: str):
@@ -106,6 +135,12 @@ def get_all_taken(month: str) -> dict:
     return {r['manager_id']: int(r['taken']) for r in rows} if rows else {}
 
 
+def get_all_availability() -> dict:
+    """Повертає {manager_id: bool} одним запитом."""
+    rows = q("SELECT manager_id, is_active FROM availability", fetch='all')
+    return {r['manager_id']: bool(r['is_active']) for r in rows} if rows else {}
+
+
 def inc_taken(manager_id: str, month: str):
     q("""INSERT INTO stats (manager_id, month, taken) VALUES (?,?,1)
          ON CONFLICT(manager_id, month) DO UPDATE SET taken = taken + 1""",
@@ -114,24 +149,29 @@ def inc_taken(manager_id: str, month: str):
 
 def take_lead(lead_id: str, manager_id: str, month: str) -> bool:
     """Атомарно бере заявку і збільшує лічильник. Повертає True якщо взято цим менеджером."""
+    conn = _get_conn()
     try:
-        with _conn() as conn:
-            cur = conn.execute(
-                "UPDATE leads SET status='taken', manager_id=?, taken_at=? "
-                "WHERE lead_id=? AND status NOT IN ('taken','duplicate')",
-                (manager_id, datetime.now().timestamp(), lead_id),
-            )
-            if cur.rowcount == 0:
-                return False
-            conn.execute(
-                """INSERT INTO stats (manager_id, month, taken) VALUES (?,?,1)
-                   ON CONFLICT(manager_id, month) DO UPDATE SET taken = taken + 1""",
-                (manager_id, month),
-            )
-            return True
+        cur = conn.execute(
+            "UPDATE leads SET status='taken', manager_id=?, taken_at=? "
+            "WHERE lead_id=? AND status NOT IN ('taken','duplicate')",
+            (manager_id, datetime.now().timestamp(), lead_id),
+        )
+        if cur.rowcount == 0:
+            conn.rollback()
+            return False
+        conn.execute(
+            """INSERT INTO stats (manager_id, month, taken) VALUES (?,?,1)
+               ON CONFLICT(manager_id, month) DO UPDATE SET taken = taken + 1""",
+            (manager_id, month),
+        )
+        conn.commit()
+        return True
     except sqlite3.Error as e:
+        conn.rollback()
         logger.error(f"take_lead | lead={lead_id} mgr={manager_id} | {e}")
         raise
+    finally:
+        _release_conn(conn)
 
 
 def get_msg_id(lead_id: str, manager_id: str) -> Optional[int]:
@@ -167,6 +207,12 @@ def is_available(manager_id: str) -> bool:
     return bool(row['is_active']) if row else False
 
 
+def set_availability(manager_id: str, active: bool):
+    q("""INSERT INTO availability (manager_id, is_active) VALUES (?, ?)
+         ON CONFLICT(manager_id) DO UPDATE SET is_active=?""",
+      (manager_id, int(active), int(active)))
+
+
 def mark_connected(manager_id: str, name: str):
     q("""INSERT INTO connected (manager_id, name, connected_at) VALUES (?,?,?)
          ON CONFLICT(manager_id) DO UPDATE SET name=?, connected_at=?""",
@@ -175,9 +221,3 @@ def mark_connected(manager_id: str, name: str):
 
 def get_connected() -> list:
     return [dict(r) for r in q("SELECT * FROM connected ORDER BY connected_at", fetch='all')]
-
-
-def set_availability(manager_id: str, active: bool):
-    q("""INSERT INTO availability (manager_id, is_active) VALUES (?, ?)
-         ON CONFLICT(manager_id) DO UPDATE SET is_active=?""",
-      (manager_id, int(active), int(active)))
