@@ -1,4 +1,5 @@
 import logging
+import threading
 from datetime import datetime
 from typing import Dict, Optional
 
@@ -55,6 +56,7 @@ def _reconnect() -> gspread.Worksheet:
 _cache: Dict[str, dict] = {}
 _cache_ts: float = 0.0
 _rows_cache: list = []
+_lock = threading.Lock()
 
 
 def _read_rows() -> list:
@@ -81,82 +83,88 @@ def fetch_managers() -> Dict[str, dict]:
     if now - cache_ts < SHEETS_REFRESH and _cache:
         return _cache
 
-    try:
-        rows      = _read_rows()
-        now_dt    = datetime.now()
-        year_str  = str(now_dt.year)
-        month_str = MONTHS_UA[now_dt.month]
+    with _lock:
+        # Повторна перевірка після отримання lock (інший потік міг вже оновити кеш)
+        now2 = datetime.now().timestamp()
+        if now2 - _cache_ts < SHEETS_REFRESH and _cache:
+            return _cache
 
-        def _int_col(row: list, idx: int) -> int:
-            if len(row) <= idx:
-                return 0
-            try:
-                return int(float(row[idx].strip().replace(' ', '').replace('\xa0', '') or '0'))
-            except (ValueError, TypeError):
-                return 0
+        try:
+            rows      = _read_rows()
+            now_dt    = datetime.now()
+            year_str  = str(now_dt.year)
+            month_str = MONTHS_UA[now_dt.month]
 
-        result: Dict[str, dict] = {}
-        for row in rows[1:]:
-            if len(row) <= COL_CONVERSION:
-                continue
-            if row[COL_YEAR].strip() != year_str:
-                continue
-            if row[COL_MONTH].strip() != month_str:
-                continue
+            def _int_col(row: list, idx: int) -> int:
+                if len(row) <= idx:
+                    return 0
+                try:
+                    return int(float(row[idx].strip().replace(' ', '').replace('\xa0', '') or '0'))
+                except (ValueError, TypeError):
+                    return 0
 
-            name  = row[COL_MANAGER].strip()
-            tg_id = MANAGERS.get(name)
-            if not tg_id:
-                continue
+            result: Dict[str, dict] = {}
+            for row in rows[1:]:
+                if len(row) <= COL_CONVERSION:
+                    continue
+                if row[COL_YEAR].strip() != year_str:
+                    continue
+                if row[COL_MONTH].strip() != month_str:
+                    continue
 
-            raw = (row[COL_CONVERSION].strip()
-                   .replace('%', '').replace(',', '.').replace(' ', '').replace('\xa0', ''))
-            try:
-                conv = float(raw)
-            except (ValueError, TypeError):
-                conv = 0.0
+                name  = row[COL_MANAGER].strip()
+                tg_id = MANAGERS.get(name)
+                if not tg_id:
+                    continue
 
-            payments  = _int_col(row, COL_PAYMENTS)
-            hot_taken = _int_col(row, COL_HOT_TAKEN)
+                raw = (row[COL_CONVERSION].strip()
+                       .replace('%', '').replace(',', '.').replace(' ', '').replace('\xa0', ''))
+                try:
+                    conv = float(raw)
+                except (ValueError, TypeError):
+                    conv = 0.0
 
-            if payments == 0:
-                # Гілка «0 оплат» — ліміт за к-тю взятих лідів
-                if hot_taken <= LEADS_UNLIM_MAX:
-                    max_leads = None
-                elif hot_taken <= LEADS_MAX5_MAX:
-                    max_leads = MAX_LEADS_5
-                elif hot_taken <= LEADS_MAX2_MAX:
-                    max_leads = MAX_LEADS_2
+                payments  = _int_col(row, COL_PAYMENTS)
+                hot_taken = _int_col(row, COL_HOT_TAKEN)
+
+                if payments == 0:
+                    # Гілка «0 оплат» — ліміт за к-тю взятих лідів
+                    if hot_taken <= LEADS_UNLIM_MAX:
+                        max_leads = None
+                    elif hot_taken <= LEADS_MAX5_MAX:
+                        max_leads = MAX_LEADS_5
+                    elif hot_taken <= LEADS_MAX2_MAX:
+                        max_leads = MAX_LEADS_2
+                    else:
+                        continue  # > 30 лідів без оплат → поза чергою
                 else:
-                    continue  # > 30 лідів без оплат → поза чергою
+                    # Гілка «є оплати» — ліміт за конверсією
+                    if conv >= CONV_UNLIMITED:
+                        max_leads = None
+                    elif conv >= CONV_MAX5_MIN:
+                        max_leads = MAX_LEADS_5
+                    elif conv >= CONV_MAX2_MIN:
+                        max_leads = MAX_LEADS_2
+                    else:
+                        continue  # < 3.3% → поза чергою
+
+                result[tg_id] = {
+                    'name':       name,
+                    'conversion': conv,
+                    'payments':   payments,
+                    'hot_taken':  hot_taken,
+                    'max_leads':  max_leads,
+                }
+
+            _cache    = result
+            _cache_ts = datetime.now().timestamp()
+            if result:
+                logger.info(f"Sheets: {len(result)} менеджерів у черзі")
             else:
-                # Гілка «є оплати» — ліміт за конверсією
-                if conv >= CONV_UNLIMITED:
-                    max_leads = None
-                elif conv >= CONV_MAX5_MIN:
-                    max_leads = MAX_LEADS_5
-                elif conv >= CONV_MAX2_MIN:
-                    max_leads = MAX_LEADS_2
-                else:
-                    continue  # < 3.3% → поза чергою
+                logger.warning("Sheets: жодного менеджера не знайдено за поточний місяць")
 
-            result[tg_id] = {
-                'name':       name,
-                'conversion': conv,
-                'payments':   payments,
-                'hot_taken':  hot_taken,
-                'max_leads':  max_leads,
-            }
-
-        _cache    = result
-        _cache_ts = datetime.now().timestamp()
-        if result:
-            logger.info(f"Sheets: {len(result)} менеджерів у черзі")
-        else:
-            logger.warning("Sheets: жодного менеджера не знайдено за поточний місяць")
-
-    except Exception as e:
-        logger.error(f"Sheets помилка: {e}")
+        except Exception as e:
+            logger.error(f"Sheets помилка: {e}")
 
     return _cache
 

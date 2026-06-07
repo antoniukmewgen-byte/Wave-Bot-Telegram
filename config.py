@@ -5,6 +5,7 @@ load_dotenv()
 
 BOT_TOKEN      = os.environ['BOT_TOKEN']
 AMO_SUBDOMAIN  = os.environ.get('AMO_SUBDOMAIN', 'movenation')
+WEBHOOK_PATH   = os.environ.get('WEBHOOK_PATH', 'movenation')
 SHEETS_ID      = os.environ['SHEETS_ID']
 SHEET_NAME     = os.environ.get('SHEET_NAME', 'План|Факт|Мотивація Мдж')
 GOOGLE_CREDS   = os.environ.get('GOOGLE_CREDS', 'google_creds.json')
@@ -21,7 +22,7 @@ MANAGERS = {
     'Тимур Мартиросян':     '882157285',
     'Денис Брюхарєв':       '8356737322',
     'Олексій Тихоненко':    '7083918297',
-    'Ярослав Глуховецький': '7398315975',
+    'Ярослав Глуховецький': '8422370073',
     'Олександр Флоряк':     '7820509171',
     'Денис Местоян':        '8880314477',
     'Антон Нечипорук':      '8625011946',

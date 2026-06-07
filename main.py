@@ -5,14 +5,14 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Request
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.error import Forbidden, RetryAfter, TimedOut, NetworkError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from config import (
     BOT_TOKEN, AMO_SUBDOMAIN, HOT_STATUSES, ADMIN_ID,
     TIMEOUT_PERSONAL, TIMEOUT_WARN, TIMEOUT_SOS, TIMEOUT_REBROADCAST,
-    SCHEDULER_TICK, MANAGERS,
+    SCHEDULER_TICK, MANAGERS, WEBHOOK_PATH,
 )
 from db import (
     init_db, q, get_lead, get_taken, get_all_taken, get_all_availability, take_lead,
@@ -36,6 +36,13 @@ MANAGERS_BY_ID: dict = {v: k for k, v in MANAGERS.items()}
 
 
 # ─── СПОВІЩЕННЯ ПРО ПОМИЛКИ ──────────────────────────────────────────────────
+
+async def send_long(message, text: str, parse_mode: str = 'HTML'):
+    """Розбиває довге повідомлення на частини по 4096 символів."""
+    limit = 4096
+    for i in range(0, len(text), limit):
+        await message.reply_text(text[i:i + limit], parse_mode=parse_mode)
+
 
 async def notify_admin_error(where: str, error: Exception, manager_id: str = None):
     """Надсилає адміну повідомлення про помилку."""
@@ -71,8 +78,9 @@ def build_keyboard(lead_id: str) -> InlineKeyboardMarkup:
     ]])
 
 
-def sorted_queue(exclude: list[str] = None) -> list[str]:
-    managers   = fetch_managers()
+def sorted_queue(exclude: list[str] = None, managers: dict = None) -> list[str]:
+    if managers is None:
+        managers = fetch_managers()
     month      = month_key()
     exclude    = set(exclude or [])
     taken_map  = get_all_taken(month)
@@ -168,6 +176,17 @@ async def edit_msg(manager_id: str, lead_id: str, text: str, keep_buttons: bool 
         logger.debug(f"edit_msg {manager_id}: {e}")
 
 
+async def delete_and_send(manager_id: str, lead_id: str, text: str):
+    """Видаляє старе повідомлення і відправляє нове (ескалація)."""
+    msg_id = get_msg_id(lead_id, manager_id)
+    if msg_id:
+        try:
+            await _app.bot.delete_message(chat_id=manager_id, message_id=msg_id)
+        except Exception as e:
+            logger.debug(f"delete_and_send: не вдалось видалити {msg_id} для {manager_id}: {e}")
+    await send_to(manager_id, lead_id, text)
+
+
 async def remove_from_others(lead_id: str, except_id: str = None, note: str = "✅ Заявку вже взято в роботу"):
     for m in get_all_msgs(lead_id):
         if m['manager_id'] == except_id:
@@ -187,20 +206,22 @@ async def assign_next(lead_id: str, exclude: list[str] = None):
 
     if not queue:
         logger.warning(f"Заявка {lead_id}: немає вільних менеджерів")
-        if ADMIN_ID:
-            try:
-                lead = get_lead(lead_id)
-                await _app.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=(
-                        f"⚠️ <b>Немає вільних менеджерів!</b>\n\n"
-                        f"Заявка {lead['title'] if lead else lead_id} не розподілена.\n"
-                        f"Перевірте таблицю — можливо не заповнено поточний місяць."
-                    ),
-                    parse_mode='HTML',
-                )
-            except Exception as e:
-                logger.error(f"Не вдалось сповістити адміна: {e}")
+        lead = get_lead(lead_id)
+        if lead and lead['status'] == 'queued':
+            q("UPDATE leads SET status='no_managers' WHERE lead_id=?", (lead_id,))
+            if ADMIN_ID:
+                try:
+                    await _app.bot.send_message(
+                        chat_id=ADMIN_ID,
+                        text=(
+                            f"⚠️ <b>Немає вільних менеджерів!</b>\n\n"
+                            f"Заявка {lead['title']} не розподілена.\n"
+                            f"Перевірте таблицю — можливо не заповнено поточний місяць."
+                        ),
+                        parse_mode='HTML',
+                    )
+                except Exception as e:
+                    logger.error(f"Не вдалось сповістити адміна: {e}")
         return
 
     manager_id   = queue[0]
@@ -212,8 +233,7 @@ async def assign_next(lead_id: str, exclude: list[str] = None):
         return
 
     text = (
-        f"🔥 <b>Нова гаряча заявка!</b>\n\n"
-        f"{lead['title']}\n\n"
+        f"{lead['title']}\n"
         f"👤 <i>Черга: {manager_name}</i>"
     )
 
@@ -233,15 +253,13 @@ async def broadcast_to_all(lead_id: str):
     if not lead or lead['status'] in ('taken', 'duplicate'):
         return
 
-    queue = sorted_queue()
+    queue = sorted_queue(exclude=get_skipped(lead_id))
+    text  = f"{lead['title']}\n👤 <i>Відкрита черга</i>"
     for mid in queue:
-        text = f"🔥 <b>Нова гаряча заявка!</b> (відкрита черга)\n\n{lead['title']}"
-        if get_msg_id(lead_id, mid):
-            await edit_msg(mid, lead_id, text, keep_buttons=True)
-        else:
-            await send_to(mid, lead_id, text)
+        await delete_and_send(mid, lead_id, text)
 
-    q("UPDATE leads SET status='broadcast', esc_level=1 WHERE lead_id=?", (lead_id,))
+    q("UPDATE leads SET status='broadcast', esc_level=1, sent_at=? WHERE lead_id=?",
+      (datetime.now().timestamp(), lead_id))
     logger.info(f"Заявка {lead_id} розіслана всім ({len(queue)} менеджерів)")
 
 
@@ -250,12 +268,9 @@ async def escalate_warn(lead_id: str, title: str):
         f"⚠️⚠️⚠️ <b>ТЕРМІНОВО!</b>\n"
         f"Заявка вже <b>5 хвилин</b> без відповіді!\n\n{title}"
     )
-    queue = sorted_queue()
+    queue = sorted_queue(exclude=get_skipped(lead_id))
     for mid in queue:
-        if get_msg_id(lead_id, mid):
-            await edit_msg(mid, lead_id, warn, keep_buttons=True)
-        else:
-            await send_to(mid, lead_id, warn)
+        await delete_and_send(mid, lead_id, warn)
     q("UPDATE leads SET esc_level=2 WHERE lead_id=?", (lead_id,))
     logger.info(f"Заявка {lead_id}: 5-хвилинне попередження")
 
@@ -265,12 +280,9 @@ async def escalate_sos(lead_id: str, title: str):
         f"🆘🚨💀🔴 <b>SOS!!! ЗАЯВКА 10 ХВИЛИН!!!</b> 🔴💀🚨🆘\n"
         f"😱🔥💥 ХТОСЬ ВІЗЬМІТЬ ВЖЕ! 💥🔥😱\n\n{title}"
     )
-    queue = sorted_queue()
+    queue = sorted_queue(exclude=get_skipped(lead_id))
     for mid in queue:
-        if get_msg_id(lead_id, mid):
-            await edit_msg(mid, lead_id, sos, keep_buttons=True)
-        else:
-            await send_to(mid, lead_id, sos)
+        await delete_and_send(mid, lead_id, sos)
     now = datetime.now().timestamp()
     q("UPDATE leads SET esc_level=3, last_rebroadcast_at=? WHERE lead_id=?", (now, lead_id))
     logger.info(f"Заявка {lead_id}: SOS 10 хвилин")
@@ -282,12 +294,9 @@ async def rebroadcast_periodic(lead_id: str, title: str):
         f"🔄 <b>Заявка досі не взята!</b>\n"
         f"⏰ Повторна розсилка — будь ласка, візьміть в роботу!\n\n{title}"
     )
-    queue = sorted_queue()
+    queue = sorted_queue(exclude=get_skipped(lead_id))
     for mid in queue:
-        if get_msg_id(lead_id, mid):
-            await edit_msg(mid, lead_id, msg, keep_buttons=True)
-        else:
-            await send_to(mid, lead_id, msg)
+        await delete_and_send(mid, lead_id, msg)
     q("UPDATE leads SET last_rebroadcast_at=? WHERE lead_id=?",
       (datetime.now().timestamp(), lead_id))
     logger.info(f"Заявка {lead_id}: повторна розсилка (кожні 30 хв)")
@@ -332,26 +341,39 @@ async def _tick():
         fetch='all',
     )
     for lead in leads:
-        if lead['status'] == 'queued' and not lead['sent_at']:
-            if now - lead['created_at'] > 5:
-                await assign_next(lead['lead_id'])
+        lid  = lead['lead_id']
+        age  = now - lead['created_at']
+        lvl  = lead['esc_level']
+        last_rb = lead['last_rebroadcast_at']
+
+        logger.debug(
+            f"_tick | lead={lid} status={lead['status']} esc={lvl} "
+            f"age={int(age)}s sent={'yes' if lead['sent_at'] else 'no'} "
+            f"last_rb={int(now - last_rb)}s ago" if last_rb else
+            f"_tick | lead={lid} status={lead['status']} esc={lvl} "
+            f"age={int(age)}s sent={'yes' if lead['sent_at'] else 'no'} last_rb=none"
+        )
+
+        # ── Заявки без sent_at (ще не розіслані або no_managers) ──────────────
+        if lead['status'] in ('queued', 'no_managers') and not lead['sent_at']:
+            if age > 5:
+                await assign_next(lid)
             continue
 
         if not lead['sent_at']:
             continue
 
-        age = now - lead['created_at']
-
-        if lead['esc_level'] == 0 and age >= TIMEOUT_PERSONAL:
-            await broadcast_to_all(lead['lead_id'])
-        elif lead['esc_level'] == 1 and age >= TIMEOUT_WARN:
-            await escalate_warn(lead['lead_id'], lead['title'])
-        elif lead['esc_level'] == 2 and age >= TIMEOUT_SOS:
-            await escalate_sos(lead['lead_id'], lead['title'])
-        elif lead['esc_level'] >= 3:
-            last_rb = lead['last_rebroadcast_at'] or lead['sent_at'] or lead['created_at']
-            if now - last_rb >= TIMEOUT_REBROADCAST:
-                await rebroadcast_periodic(lead['lead_id'], lead['title'])
+        # ── Заявки з sent_at — ескалація ──────────────────────────────────────
+        if lvl == 0 and age >= TIMEOUT_PERSONAL:
+            await broadcast_to_all(lid)
+        elif lvl == 1 and age >= TIMEOUT_WARN:
+            await escalate_warn(lid, lead['title'])
+        elif lvl == 2 and age >= TIMEOUT_SOS:
+            await escalate_sos(lid, lead['title'])
+        elif lvl >= 3:
+            rb_base = last_rb or lead['sent_at'] or lead['created_at']
+            if now - rb_base >= TIMEOUT_REBROADCAST:
+                await rebroadcast_periodic(lid, lead['title'])
 
 
 # ─── ОБРОБНИКИ CALLBACK ──────────────────────────────────────────────────────
@@ -359,13 +381,11 @@ async def _tick():
 def work_keyboard(is_active: bool) -> InlineKeyboardMarkup:
     if is_active:
         return InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Я в роботі", callback_data="work:on"),
-            InlineKeyboardButton("🔴 Вийти з черги", callback_data="work:off"),
+            InlineKeyboardButton("🚫 Вийти з черги", callback_data="work:off"),
         ]])
     else:
         return InlineKeyboardMarkup([[
-            InlineKeyboardButton("🟢 Увійти в чергу", callback_data="work:on"),
-            InlineKeyboardButton("❌ Я не в роботі", callback_data="work:off"),
+            InlineKeyboardButton("✅ Увійти в чергу", callback_data="work:on"),
         ]])
 
 
@@ -376,14 +396,14 @@ async def on_work_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text   = update.message.text
-    active = text == "🟢 Я в роботі"
+    active = text == "✅ Увійти в чергу"
     set_availability(user_id, active)
 
-    status = "✅ Ви в черзі — заявки надходитимуть" if active else "🔴 Ви вийшли з черги — заявки не надходитимуть"
     kb = ReplyKeyboardMarkup(
-        [[KeyboardButton("🟢 Я в роботі"), KeyboardButton("🔴 Не в роботі")]],
+        [[KeyboardButton("✅ Увійти в чергу"), KeyboardButton("🚫 Вийти з черги")]],
         resize_keyboard=True,
     )
+    status = "✅ Ви в черзі — заявки надходитимуть" if active else "🚫 Ви вийшли з черги — заявки не надходитимуть"
     await update.message.reply_text(status, reply_markup=kb)
     logger.info(f"{name} {'увійшов в чергу' if active else 'вийшов з черги'}")
 
@@ -396,7 +416,7 @@ async def on_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     active = is_available(user_id)
-    status = "✅ В черзі" if active else "🔴 Не в черзі"
+    status = "✅ В черзі" if active else "🚫 Не в черзі"
     await update.message.reply_text(
         f"👤 <b>{name}</b>\nПоточний статус: {status}\n\nОберіть дію:",
         reply_markup=work_keyboard(active),
@@ -407,15 +427,19 @@ async def on_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id   = str(update.effective_user.id)
     user_name = update.effective_user.full_name
-    mgr_name  = MANAGERS_BY_ID.get(user_id, f"Невідомий ({user_name})")
 
+    if user_id not in MANAGERS.values() and user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ У вас немає доступу до цього бота.")
+        return
+
+    mgr_name = MANAGERS_BY_ID.get(user_id, user_name)
     mark_connected(user_id, mgr_name)
 
     if user_id in MANAGERS.values():
         active = is_available(user_id)
-        status = "✅ В черзі" if active else "🔴 Не в черзі"
+        status = "✅ В черзі" if active else "🚫 Не в черзі"
         kb = ReplyKeyboardMarkup(
-            [[KeyboardButton("🟢 Я в роботі"), KeyboardButton("🔴 Не в роботі")]],
+            [[KeyboardButton("✅ Увійти в чергу"), KeyboardButton("🚫 Вийти з черги")]],
             resize_keyboard=True,
         )
         await update.message.reply_text(
@@ -433,11 +457,6 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             resize_keyboard=True,
         )
         await update.message.reply_text("👋 Вітаю, адміне!\nОберіть дію:", reply_markup=kb)
-    else:
-        await update.message.reply_text(
-            f"✅ Вітаю, {user_name}!\nВи підключені до системи розподілу заявок."
-        )
-
     if ADMIN_ID and ADMIN_ID != user_id:
         try:
             await context.bot.send_message(
@@ -459,15 +478,21 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     month    = month_key()
 
     if text == "👥 Статус менеджерів":
+        connected_ids = {r['manager_id'] for r in get_connected()}
+        avail_map     = get_all_availability()
         lines = ["👥 <b>Статус менеджерів:</b>\n"]
         for name, tg_id in MANAGERS.items():
             if tg_id == '0':
                 lines.append(f"❌ {name} — ID не вказано")
                 continue
-            in_queue  = tg_id in managers
+            if tg_id not in connected_ids:
+                lines.append(f"❌ {name} — ще не підключився")
+                continue
             taken     = get_taken(tg_id, month)
             info      = managers.get(tg_id, {})
             max_leads = info.get('max_leads')
+            at_limit  = max_leads is not None and taken >= max_leads
+            in_queue  = tg_id in managers and avail_map.get(tg_id, False) and not at_limit
             conv      = info.get('conversion', 0)
             payments  = info.get('payments', '?')
             hot_taken = info.get('hot_taken', '?')
@@ -482,7 +507,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(
                     f"✅ {name} — взяв: {taken}/{limit_str} | {basis} | оплат: {payments}"
                 )
-        await update.message.reply_text('\n'.join(lines), parse_mode='HTML')
+        await send_long(update.message, '\n'.join(lines))
 
     elif text == "🔌 Підключення":
         connected = {r['manager_id']: r for r in get_connected()}
@@ -496,7 +521,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"✅ {name} — підключився {dt.strftime('%d.%m %H:%M')}")
             else:
                 lines.append(f"❌ {name} — ще не підключився")
-        await update.message.reply_text('\n'.join(lines), parse_mode='HTML')
+        await send_long(update.message, '\n'.join(lines))
 
     elif text == "📋 Активні заявки":
         rows = q(
@@ -520,7 +545,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"• {lead['title']}\n"
                 f"  {status_str} | ⏱ {age_min} хв | 👤 {mgr}"
             )
-        await update.message.reply_text('\n'.join(lines), parse_mode='HTML')
+        await send_long(update.message, '\n'.join(lines))
 
     elif text == "📅 Статистика день":
         now_dt      = datetime.now()
@@ -542,8 +567,8 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         table_rows = []
         for lead in today_rows:
             recv_str = datetime.fromtimestamp(lead['created_at']).strftime('%H:%M')
-            if lead['status'] == 'taken' and lead['taken_at'] and lead['sent_at']:
-                reaction_str = f"{max(0, int((lead['taken_at'] - lead['sent_at']) / 60))} хв"
+            if lead['status'] == 'taken' and lead['taken_at'] and lead['created_at']:
+                reaction_str = f"{max(0, int((lead['taken_at'] - lead['created_at']) / 60))} хв"
                 status_str   = "Взято"
                 mgr_name     = MANAGERS_BY_ID.get(lead['manager_id'], '—')
             else:
@@ -593,12 +618,12 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mid = lead['manager_id'] or '—'
             if lead['status'] == 'taken':
                 mgr_taken[mid] += 1
-                if lead['taken_at'] and lead['sent_at']:
+                if lead['taken_at'] and lead['created_at']:
                     mgr_reactions[mid].append(
-                        max(0, int((lead['taken_at'] - lead['sent_at']) / 60))
+                        max(0, int((lead['taken_at'] - lead['created_at']) / 60))
                     )
             else:
-                mgr_not['—'] += 1
+                mgr_not[mid] += 1
 
         m_rows        = []
         total_taken   = 0
@@ -613,7 +638,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             avg_str = f"{int(sum(reactions)/len(reactions))} хв" if reactions else "—"
             m_rows.append((mgr_name, str(t), avg_str))
 
-        not_taken_total = mgr_not.get('—', 0)
+        not_taken_total = sum(mgr_not.values())
         overall_avg = (
             f"{int(sum(all_reactions)/len(all_reactions))} хв"
             if all_reactions else "—"
@@ -644,7 +669,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif text == "📊 Черга":
-        queue = sorted_queue()
+        queue = sorted_queue(managers=managers)
         if not queue:
             await update.message.reply_text("😶 Черга порожня — немає вільних менеджерів")
             return
@@ -653,7 +678,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name  = managers.get(tg_id, {}).get('name', tg_id)
             taken = get_taken(tg_id, month)
             lines.append(f"{i}. {name} — взяв: {taken}")
-        await update.message.reply_text('\n'.join(lines), parse_mode='HTML')
+        await send_long(update.message, '\n'.join(lines))
 
 
 
@@ -726,7 +751,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             active = (lead_id == 'on')
             set_availability(manager_id, active)
-            status = "✅ Ви в черзі — заявки надходитимуть" if active else "🔴 Ви вийшли з черги — заявки не надходитимуть"
+            status = "✅ Ви в черзі — заявки надходитимуть" if active else "🚫 Ви вийшли з черги — заявки не надходитимуть"
             await query.edit_message_text(
                 f"👤 <b>{name}</b>\n\n{status}\n\nЩоб змінити — напишіть /work",
                 reply_markup=work_keyboard(active),
@@ -751,7 +776,7 @@ async def lifespan(fastapi: FastAPI):
     _app.add_handler(CommandHandler('start', on_start))
     _app.add_handler(CommandHandler('work', on_work))
     _app.add_handler(MessageHandler(
-        filters.TEXT & filters.Regex(r'^(🟢 Я в роботі|🔴 Не в роботі)$'),
+        filters.TEXT & filters.Regex(r'^(✅ Увійти в чергу|🚫 Вийти з черги)$'),
         on_work_button,
     ))
     _app.add_handler(MessageHandler(
@@ -778,25 +803,36 @@ async def lifespan(fastapi: FastAPI):
 fastapi_app = FastAPI(lifespan=lifespan)
 
 
-@fastapi_app.post('/webhook/movenation')
+@fastapi_app.post(f'/webhook/{WEBHOOK_PATH}')
 async def amocrm_webhook(request: Request):
     try:
         data = await request.form()
     except Exception:
         return {'ok': True}
 
-    lead_id   = data.get('leads[status][0][id]')   or data.get('leads[add][0][id]')
-    status_id = data.get('leads[status][0][status_id]') or data.get('leads[add][0][status_id]')
+    lead_id   = (data.get('leads[status][0][id]')
+                 or data.get('leads[add][0][id]'))
+    status_id = (data.get('leads[status][0][status_id]')
+                 or data.get('leads[add][0][status_id]'))
 
-    if not lead_id or str(status_id) not in HOT_STATUSES:
+    logger.info(f"Webhook: lead_id={lead_id} status_id={status_id} keys={list(data.keys())[:6]}")
+
+    if not lead_id:
         return {'ok': True}
 
     if get_lead(lead_id):
         return {'ok': True}
 
-    label    = HOT_STATUSES[str(status_id)]
+    raw_label = HOT_STATUSES.get(str(status_id), 'Нова заявка')
+    # Формуємо заголовок рамки залежно від типу заявки
+    if 'Гаряча' in raw_label:
+        header = '🔥 ГАРЯЧА ЗАЯВКА'
+    elif 'Кваліфікована' in raw_label:
+        header = '⭐ КВАЛІФІКОВАНА ЗАЯВКА'
+    else:
+        header = '📋 НОВА ЗАЯВКА'
     lead_url = f"https://{AMO_SUBDOMAIN}.kommo.com/leads/detail/{lead_id}"
-    title    = f"<b>{label}</b>\n🔗 <a href='{lead_url}'>Угода #{lead_id}</a>"
+    title    = f"┌─ {header} ─┐\n\n🔗 <a href='{lead_url}'>Угода #{lead_id}</a>"
 
     try:
         q("INSERT INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
