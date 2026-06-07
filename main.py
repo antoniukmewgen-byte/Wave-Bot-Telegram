@@ -810,14 +810,24 @@ async def amocrm_webhook(request: Request):
     except Exception:
         return {'ok': True}
 
-    lead_id   = (data.get('leads[status][0][id]')
-                 or data.get('leads[add][0][id]'))
-    status_id = (data.get('leads[status][0][status_id]')
-                 or data.get('leads[add][0][status_id]'))
+    lead_id     = (data.get('leads[status][0][id]')
+                   or data.get('leads[add][0][id]'))
+    status_id   = (data.get('leads[status][0][status_id]')
+                   or data.get('leads[add][0][status_id]'))
+    pipeline_id = (data.get('leads[status][0][pipeline_id]')
+                   or data.get('leads[add][0][pipeline_id]'))
 
-    logger.info(f"Webhook: lead_id={lead_id} status_id={status_id} keys={list(data.keys())[:6]}")
+    logger.info(f"Webhook: lead_id={lead_id} status_id={status_id} pipeline_id={pipeline_id} keys={list(data.keys())[:6]}")
 
     if not lead_id:
+        return {'ok': True}
+
+    if str(pipeline_id) != '10815171':
+        logger.info(f"Webhook: ігноруємо pipeline_id={pipeline_id} (не наша воронка)")
+        return {'ok': True}
+
+    if str(status_id) != '85731907':
+        logger.info(f"Webhook: ігноруємо status_id={status_id} (не наш етап)")
         return {'ok': True}
 
     if get_lead(lead_id):
