@@ -9,7 +9,7 @@ WEBHOOK_PATH   = os.environ.get('WEBHOOK_PATH', 'movenation')
 SHEETS_ID      = os.environ['SHEETS_ID']
 SHEET_NAME     = os.environ.get('SHEET_NAME', 'План|Факт|Мотивація Мдж')
 GOOGLE_CREDS   = os.environ.get('GOOGLE_CREDS', 'google_creds.json')
-ADMIN_ID       = os.environ.get('ADMIN_ID', '')
+ADMIN_IDS      = [i.strip() for i in os.environ.get('ADMIN_IDS', '').split(',') if i.strip()]
 
 COL_MANAGER    = 0
 COL_YEAR       = 2
@@ -22,14 +22,16 @@ MANAGERS = {
     'Тимур Мартиросян':     '882157285',
     'Денис Брюхарєв':       '8356737322',
     'Олексій Тихоненко':    '7083918297',
-    'Ярослав Глуховецький': '8422370073',
+    'Ярослав Глуховецький': '7398315975',
     'Олександр Флоряк':     '7820509171',
     'Денис Местоян':        '8880314477',
     'Антон Нечипорук':      '8625011946',
+    'Федір Козулін':        '8762578305',
     'Данііл Коренков':      '6897495788',
     'Семен Оленіч':         '8789635065',
     'Владислав Смирнов':    '8679654304',
     'Єгор Рубцов':          '8742796502',
+    'Олександр Каулько':    '442293112',
 }
 
 TIMEOUT_PERSONAL     = 120    # 2 хв  → перша особиста розсилка

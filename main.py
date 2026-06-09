@@ -10,7 +10,7 @@ from telegram.error import Forbidden, RetryAfter, TimedOut, NetworkError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from config import (
-    BOT_TOKEN, AMO_SUBDOMAIN, HOT_STATUSES, ADMIN_ID,
+    BOT_TOKEN, AMO_SUBDOMAIN, HOT_STATUSES, ADMIN_IDS,
     TIMEOUT_PERSONAL, TIMEOUT_WARN, TIMEOUT_SOS, TIMEOUT_REBROADCAST,
     SCHEDULER_TICK, MANAGERS, WEBHOOK_PATH,
 )
@@ -44,9 +44,18 @@ async def send_long(message, text: str, parse_mode: str = 'HTML'):
         await message.reply_text(text[i:i + limit], parse_mode=parse_mode)
 
 
+async def notify_admins(text: str):
+    """Надсилає повідомлення всім адмінам."""
+    for admin_id in ADMIN_IDS:
+        try:
+            await _app.bot.send_message(chat_id=admin_id, text=text, parse_mode='HTML')
+        except Exception:
+            pass
+
+
 async def notify_admin_error(where: str, error: Exception, manager_id: str = None):
     """Надсилає адміну повідомлення про помилку."""
-    if not ADMIN_ID or not _app:
+    if not ADMIN_IDS or not _app:
         return
     mgr_part = ''
     if manager_id:
@@ -57,10 +66,7 @@ async def notify_admin_error(where: str, error: Exception, manager_id: str = Non
         f"📍 Місце: <code>{where}</code>{mgr_part}\n"
         f"❗ Помилка: <code>{type(error).__name__}: {error}</code>"
     )
-    try:
-        await _app.bot.send_message(chat_id=ADMIN_ID, text=text, parse_mode='HTML')
-    except Exception:
-        pass
+    await notify_admins(text)
 
 
 # ─── УТИЛІТИ ─────────────────────────────────────────────────────────────────
@@ -109,15 +115,7 @@ async def _deactivate_blocked(manager_id: str):
     set_availability(manager_id, False)
     name = MANAGERS_BY_ID.get(manager_id, manager_id)
     logger.warning(f"{name} ({manager_id}) заблокував бота — деактивовано")
-    if ADMIN_ID:
-        try:
-            await _app.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"🚫 <b>{name}</b> заблокував бота — автоматично виведено з черги",
-                parse_mode='HTML',
-            )
-        except Exception:
-            pass
+    await notify_admins(f"🚫 <b>{name}</b> заблокував бота — автоматично виведено з черги")
 
 
 async def _tg_retry(coro_fn, manager_id: str):
@@ -209,19 +207,11 @@ async def assign_next(lead_id: str, exclude: list[str] = None):
         lead = get_lead(lead_id)
         if lead and lead['status'] == 'queued':
             q("UPDATE leads SET status='no_managers' WHERE lead_id=?", (lead_id,))
-            if ADMIN_ID:
-                try:
-                    await _app.bot.send_message(
-                        chat_id=ADMIN_ID,
-                        text=(
-                            f"⚠️ <b>Немає вільних менеджерів!</b>\n\n"
-                            f"Заявка {lead['title']} не розподілена.\n"
-                            f"Перевірте таблицю — можливо не заповнено поточний місяць."
-                        ),
-                        parse_mode='HTML',
-                    )
-                except Exception as e:
-                    logger.error(f"Не вдалось сповістити адміна: {e}")
+            await notify_admins(
+                f"⚠️ <b>Немає вільних менеджерів!</b>\n\n"
+                f"Заявка {lead['title']} не розподілена.\n"
+                f"Перевірте таблицю — можливо не заповнено поточний місяць."
+            )
         return
 
     manager_id   = queue[0]
@@ -428,7 +418,7 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id   = str(update.effective_user.id)
     user_name = update.effective_user.full_name
 
-    if user_id not in MANAGERS.values() and user_id != ADMIN_ID:
+    if user_id not in MANAGERS.values() and user_id not in ADMIN_IDS:
         await update.message.reply_text("⛔ У вас немає доступу до цього бота.")
         return
 
@@ -446,7 +436,7 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Вітаю, {mgr_name}!\nПоточний статус: {status}",
             reply_markup=kb,
         )
-    elif user_id == ADMIN_ID:
+    elif user_id in ADMIN_IDS:
         kb = ReplyKeyboardMarkup(
             [
                 [KeyboardButton("👥 Статус менеджерів"), KeyboardButton("📊 Черга")],
@@ -457,20 +447,13 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             resize_keyboard=True,
         )
         await update.message.reply_text("👋 Вітаю, адміне!\nОберіть дію:", reply_markup=kb)
-    if ADMIN_ID and ADMIN_ID != user_id:
-        try:
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"✅ <b>{mgr_name}</b> підключив(ла) бота\n👤 ID: <code>{user_id}</code>",
-                parse_mode='HTML',
-            )
-        except Exception as e:
-            logger.error(f"on_start admin notify: {e}")
+    if user_id not in ADMIN_IDS:
+        await notify_admins(f"✅ <b>{mgr_name}</b> підключив(ла) бота\n👤 ID: <code>{user_id}</code>")
 
 
 async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    if user_id != ADMIN_ID:
+    if user_id not in ADMIN_IDS:
         return
 
     text     = update.message.text
@@ -718,15 +701,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await remove_from_others(lead_id, except_id=manager_id,
                                      note=f"✅ Заявку взяв(ла) <b>{mgr_name}</b>")
             logger.info(f"Заявка {lead_id} взята {mgr_name} ({manager_id})")
-            if ADMIN_ID:
-                try:
-                    await _app.bot.send_message(
-                        chat_id=ADMIN_ID,
-                        text=f"✅ <b>{mgr_name}</b> взяв(ла) заявку в роботу\n\n{lead['title']}",
-                        parse_mode='HTML',
-                    )
-                except Exception:
-                    pass
+            await notify_admins(f"✅ <b>{mgr_name}</b> взяв(ла) заявку в роботу\n\n{lead['title']}")
 
         elif action in ('skip', 's'):
             mark_skipped(lead_id, manager_id)
