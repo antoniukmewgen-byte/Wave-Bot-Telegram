@@ -518,9 +518,10 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for lead in rows:
             age_min    = int((datetime.now().timestamp() - lead['created_at']) / 60)
             status_map = {
-                'queued':    '🕐 В черзі',
-                'sent':      '📨 Відправлена',
-                'broadcast': '📢 Розіслана всім',
+                'queued':      '🕐 В черзі',
+                'sent':        '📨 Відправлена',
+                'broadcast':   '📢 Розіслана всім',
+                'no_managers': '⚠️ Немає менеджерів',
             }
             status_str = status_map.get(lead['status'], lead['status'])
             mgr        = managers.get(lead['manager_id'] or '', {}).get('name', '—')
