@@ -209,7 +209,7 @@ async def assign_next(lead_id: str, exclude: list[str] = None):
             q("UPDATE leads SET status='no_managers' WHERE lead_id=?", (lead_id,))
             await notify_admins(
                 f"⚠️ <b>Немає вільних менеджерів!</b>\n\n"
-                f"Заявка {lead['title']} не розподілена.\n"
+                f"{lead['title']} не розподілена.\n"
                 f"Перевірте таблицю — можливо не заповнено поточний місяць."
             )
         return
@@ -526,10 +526,10 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             status_str = status_map.get(lead['status'], lead['status'])
             mgr        = managers.get(lead['manager_id'] or '', {}).get('name', '—')
             lines.append(
-                f"• {lead['title']}\n"
-                f"  {status_str} | ⏱ {age_min} хв | 👤 {mgr}"
+                f"{lead['title']}"
+                f"{status_str} | ⏱ {age_min} хв | 👤 {mgr}"
             )
-        await send_long(update.message, '\n'.join(lines))
+        await send_long(update.message, '\n\n'.join(lines))
 
     elif text == "📅 Статистика день":
         now_dt      = datetime.now()
