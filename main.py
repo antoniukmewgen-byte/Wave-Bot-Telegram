@@ -526,8 +526,10 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             status_str = status_map.get(lead['status'], lead['status'])
             mgr        = managers.get(lead['manager_id'] or '', {}).get('name', '—')
             lines.append(
-                f"{lead['title']}"
-                f"{status_str} | ⏱ {age_min} хв | 👤 {mgr}"
+                f"{lead['title']}\n"
+                f"{status_str}\n"
+                f"⏱ {age_min} хв\n"
+                f"👤 {mgr}"
             )
         await send_long(update.message, '\n\n'.join(lines))
 
@@ -818,7 +820,7 @@ async def amocrm_webhook(request: Request):
     else:
         header = '📋 НОВА ЗАЯВКА'
     lead_url = f"https://{AMO_SUBDOMAIN}.kommo.com/leads/detail/{lead_id}"
-    title    = f"┌─ {header} ─┐\n\n🔗 <a href='{lead_url}'>Угода #{lead_id}</a>"
+    title    = f"{header}\n🔗 <a href='{lead_url}'>Угода #{lead_id}</a>"
 
     try:
         q("INSERT INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
