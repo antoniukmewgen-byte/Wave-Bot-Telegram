@@ -729,6 +729,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if action in ('take', 't'):
+            # Перевіряємо ліміт перед взяттям
+            mgr_info  = managers.get(manager_id, {})
+            max_leads = mgr_info.get('max_leads')
+            if max_leads is not None:
+                taken_today = get_taken(manager_id, day_key())
+                if taken_today >= max_leads:
+                    await query.answer("⛔ Ви вже взяли максимальну кількість лідів на сьогодні", show_alert=True)
+                    await edit_msg(manager_id, lead_id, f"⛔ Ліміт вичерпано ({taken_today}/{max_leads})\n\n{lead['title']}")
+                    return
+
             if not take_lead(lead_id, manager_id, day_key()):
                 await edit_msg(manager_id, lead_id, "❌ Заявку вже взяв інший менеджер")
                 return
