@@ -97,6 +97,16 @@ def sorted_queue(exclude: list[str] = None, managers: dict = None) -> list[str]:
     taken_map  = get_all_taken(month)
     avail_map  = get_all_availability()
 
+    # Рахуємо скільки заявок зараз персонально відправлено (але ще не взято)
+    # broadcast не рахуємо — там заявка вже відкрита для всіх
+    sent_rows = q(
+        "SELECT manager_id, COUNT(*) as cnt FROM leads "
+        "WHERE status = 'sent' AND manager_id IS NOT NULL "
+        "GROUP BY manager_id",
+        fetch='all',
+    )
+    sent_map = {r['manager_id']: r['cnt'] for r in sent_rows} if sent_rows else {}
+
     queue = []
     for tg_id, info in managers.items():
         if tg_id in exclude:
@@ -104,7 +114,11 @@ def sorted_queue(exclude: list[str] = None, managers: dict = None) -> list[str]:
         if not avail_map.get(tg_id, False):
             continue
         taken     = taken_map.get(tg_id, 0)
+        pending   = sent_map.get(tg_id, 0)
         max_leads = info['max_leads']
+        # Пропускаємо якщо вже є персональна (неприйнята) заявка
+        if pending > 0:
+            continue
         if max_leads is not None and taken >= max_leads:
             continue
         queue.append((taken, tg_id))
@@ -248,8 +262,14 @@ async def broadcast_to_all(lead_id: str):
     if not lead or lead['status'] in ('taken', 'duplicate'):
         return
 
+    orig_manager = lead['manager_id']
     queue = sorted_queue(exclude=get_skipped(lead_id))
     text  = f"{lead['title']}\n👤 <i>Відкрита черга</i>"
+
+    # Оновлюємо повідомлення оригінального менеджера (якщо є)
+    if orig_manager:
+        await edit_msg(orig_manager, lead_id, text, keep_buttons=True)
+
     for mid in queue:
         await delete_and_send(mid, lead_id, text)
 
