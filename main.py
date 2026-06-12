@@ -397,6 +397,7 @@ async def on_work_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = ReplyKeyboardMarkup(
         [[KeyboardButton("✅ Увійти в чергу"), KeyboardButton("🚫 Вийти з черги")]],
         resize_keyboard=True,
+        is_persistent=True,
     )
     status = "✅ Ви в черзі — заявки надходитимуть" if active else "🚫 Ви вийшли з черги — заявки не надходитимуть"
     await update.message.reply_text(status, reply_markup=kb)
@@ -436,6 +437,7 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = ReplyKeyboardMarkup(
             [[KeyboardButton("✅ Увійти в чергу"), KeyboardButton("🚫 Вийти з черги")]],
             resize_keyboard=True,
+            is_persistent=True,
         )
         await update.message.reply_text(
             f"✅ Вітаю, {mgr_name}!\nПоточний статус: {status}",
@@ -450,6 +452,7 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [KeyboardButton("🔌 Підключення")],
             ],
             resize_keyboard=True,
+            is_persistent=True,
         )
         await update.message.reply_text("👋 Вітаю, адміне!\nОберіть дію:", reply_markup=kb)
     if user_id not in ADMIN_IDS:
@@ -484,7 +487,12 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conv      = info.get('conversion', 0)
             payments  = info.get('payments', '?')
             hot_taken = info.get('hot_taken', '?')
-            if not in_queue:
+            if at_limit:
+                lines.append(
+                    f"⛔ {name} — ліміт вичерпано ({taken}/{max_leads}) | "
+                    f"конв. {conv}% | оплат: {payments} | лідів: {hot_taken}"
+                )
+            elif not in_queue:
                 lines.append(
                     f"🚫 {name} — поза чергою "
                     f"(конв. {conv}% | оплат: {payments} | лідів: {hot_taken})"
@@ -710,6 +718,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                      note=f"✅ Заявку взяв(ла) <b>{mgr_name}</b>")
             logger.info(f"Заявка {lead_id} взята {mgr_name} ({manager_id})")
             await notify_admins(f"✅ <b>{mgr_name}</b> взяв(ла) заявку в роботу\n\n{lead['title']}")
+
+            # Перевіряємо чи менеджер досяг ліміту
+            managers_info = fetch_managers()
+            info      = managers_info.get(manager_id, {})
+            max_leads = info.get('max_leads')
+            if max_leads is not None:
+                taken_today = get_taken(manager_id, day_key())
+                if taken_today >= max_leads:
+                    await _app.bot.send_message(
+                        chat_id=manager_id,
+                        text=f"⛔ Ви взяли максимальну кількість лідів на сьогодні ({max_leads}). "
+                             f"Нові заявки надходитимуть завтра.",
+                    )
 
         elif action in ('skip', 's'):
             mark_skipped(lead_id, manager_id)
