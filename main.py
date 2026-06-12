@@ -972,13 +972,6 @@ async def lifespan(fastapi: FastAPI):
     init_db()
 
     _app = Application.builder().token(BOT_TOKEN).build()
-    _app.add_handler(CallbackQueryHandler(on_callback))
-    _app.add_handler(CommandHandler('start', on_start))
-    _app.add_handler(CommandHandler('work', on_work))
-    _app.add_handler(MessageHandler(
-        filters.TEXT & filters.Regex(r'^(✅ Увійти в чергу|🚫 Вийти з черги)$'),
-        on_work_button,
-    ))
     _app.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.TEXT & filters.Regex(r'^⚙️ Ліміти$'), limits_start)],
         states={
@@ -987,6 +980,13 @@ async def lifespan(fastapi: FastAPI):
         },
         fallbacks=[CommandHandler('cancel', limits_cancel)],
         per_user=True,
+    ))
+    _app.add_handler(CallbackQueryHandler(on_callback))
+    _app.add_handler(CommandHandler('start', on_start))
+    _app.add_handler(CommandHandler('work', on_work))
+    _app.add_handler(MessageHandler(
+        filters.TEXT & filters.Regex(r'^(✅ Увійти в чергу|🚫 Вийти з черги)$'),
+        on_work_button,
     ))
     _app.add_handler(MessageHandler(
         filters.TEXT & filters.Regex(
