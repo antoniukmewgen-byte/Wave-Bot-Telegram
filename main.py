@@ -76,6 +76,11 @@ def month_key() -> str:
     return f"{d.year}-{d.month:02d}"
 
 
+def day_key() -> str:
+    d = datetime.now()
+    return f"{d.year}-{d.month:02d}-{d.day:02d}"
+
+
 def build_keyboard(lead_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Беру в роботу", callback_data=f"t:{lead_id}"),
@@ -87,7 +92,7 @@ def build_keyboard(lead_id: str) -> InlineKeyboardMarkup:
 def sorted_queue(exclude: list[str] = None, managers: dict = None) -> list[str]:
     if managers is None:
         managers = fetch_managers()
-    month      = month_key()
+    month      = day_key()
     exclude    = set(exclude or [])
     taken_map  = get_all_taken(month)
     avail_map  = get_all_availability()
@@ -458,7 +463,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text     = update.message.text
     managers = fetch_managers()
-    month    = month_key()
+    month    = day_key()
 
     if text == "👥 Статус менеджерів":
         connected_ids = {r['manager_id'] for r in get_connected()}
@@ -696,7 +701,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if action in ('take', 't'):
-            if not take_lead(lead_id, manager_id, month_key()):
+            if not take_lead(lead_id, manager_id, day_key()):
                 await edit_msg(manager_id, lead_id, "❌ Заявку вже взяв інший менеджер")
                 return
 
