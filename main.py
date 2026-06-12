@@ -621,13 +621,50 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return " | ".join(c.ljust(w) for c, w in zip(cols, col_w))
 
         taken_today = sum(1 for r in today_rows if r['status'] == 'taken')
-        await update.message.reply_text(
+
+        # Підсумок по менеджерах
+        mgr_taken_d     = defaultdict(int)
+        mgr_reactions_d = defaultdict(list)
+        for lead in today_rows:
+            if lead['status'] == 'taken':
+                mid = lead['manager_id'] or '—'
+                mgr_taken_d[mid] += 1
+                if lead['taken_at'] and lead['created_at']:
+                    mgr_reactions_d[mid].append(
+                        max(0, int((lead['taken_at'] - lead['created_at']) / 60))
+                    )
+
+        summary_rows = []
+        for mgr_name, tg_id in MANAGERS.items():
+            t = mgr_taken_d.get(tg_id, 0)
+            if t == 0:
+                continue
+            reactions = mgr_reactions_d.get(tg_id, [])
+            avg_str = f"{int(sum(reactions)/len(reactions))} хв" if reactions else "—"
+            summary_rows.append((mgr_name, str(t), avg_str))
+
+        s_headers = ["Менеджер", "Взято", "Сер. реакція"]
+        summary_block = ""
+        if summary_rows:
+            s_col_w = [max(len(h), max(len(r[i]) for r in summary_rows))
+                       for i, h in enumerate(s_headers)]
+            def fmt_s(cols):
+                return " | ".join(c.ljust(w) for c, w in zip(cols, s_col_w))
+            summary_block = (
+                f"\n\n📊 <b>По менеджерах:</b>\n"
+                f"<pre>{fmt_s(s_headers)}\n"
+                f"{'-+-'.join('-' * w for w in s_col_w)}\n"
+                f"{chr(10).join(fmt_s(r) for r in summary_rows)}</pre>"
+            )
+
+        await send_long(
+            update.message,
             f"📅 <b>За сьогодні ({today_str})</b>\n"
             f"Всього: {len(today_rows)} | Взято: {taken_today} | Не взято: {len(today_rows) - taken_today}\n\n"
             f"<pre>{fmt_row(headers)}\n"
             f"{'-+-'.join('-' * w for w in col_w)}\n"
-            f"{chr(10).join(fmt_row(r) for r in table_rows)}</pre>",
-            parse_mode='HTML',
+            f"{chr(10).join(fmt_row(r) for r in table_rows)}</pre>"
+            f"{summary_block}",
         )
 
     elif text == "📆 Статистика місяць":
