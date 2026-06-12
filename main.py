@@ -38,10 +38,24 @@ MANAGERS_BY_ID: dict = {v: k for k, v in MANAGERS.items()}
 # ─── СПОВІЩЕННЯ ПРО ПОМИЛКИ ──────────────────────────────────────────────────
 
 async def send_long(message, text: str, parse_mode: str = 'HTML'):
-    """Розбиває довге повідомлення на частини по 4096 символів."""
+    """Розбиває довге повідомлення на частини по межах блоків (не ріже теги)."""
     limit = 4096
-    for i in range(0, len(text), limit):
-        await message.reply_text(text[i:i + limit], parse_mode=parse_mode)
+    if len(text) <= limit:
+        await message.reply_text(text, parse_mode=parse_mode)
+        return
+
+    # Розбиваємо по блоках \n\n щоб не розрізати HTML теги
+    blocks = text.split('\n\n')
+    chunk  = ''
+    for block in blocks:
+        if len(chunk) + len(block) + 2 > limit:
+            if chunk:
+                await message.reply_text(chunk.strip(), parse_mode=parse_mode)
+            chunk = block
+        else:
+            chunk = chunk + '\n\n' + block if chunk else block
+    if chunk:
+        await message.reply_text(chunk.strip(), parse_mode=parse_mode)
 
 
 async def notify_admins(text: str):
