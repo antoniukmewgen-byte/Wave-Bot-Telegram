@@ -972,14 +972,16 @@ async def lifespan(fastapi: FastAPI):
     init_db()
 
     _app = Application.builder().token(BOT_TOKEN).build()
+    _lim_entry = MessageHandler(filters.TEXT & filters.Regex(r'^⚙️ Ліміти$'), limits_start)
     _app.add_handler(ConversationHandler(
-        entry_points=[MessageHandler(filters.TEXT & filters.Regex(r'^⚙️ Ліміти$'), limits_start)],
+        entry_points=[_lim_entry],
         states={
-            LIMIT_SELECT: [CallbackQueryHandler(limits_select, pattern=r'^setlim:')],
-            LIMIT_INPUT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, limits_input)],
+            LIMIT_SELECT: [CallbackQueryHandler(limits_select, pattern=r'^setlim:'), _lim_entry],
+            LIMIT_INPUT:  [_lim_entry, MessageHandler(filters.TEXT & ~filters.COMMAND, limits_input)],
         },
         fallbacks=[CommandHandler('cancel', limits_cancel)],
         per_user=True,
+        allow_reentry=True,
     ))
     _app.add_handler(CallbackQueryHandler(on_callback))
     _app.add_handler(CommandHandler('start', on_start))
