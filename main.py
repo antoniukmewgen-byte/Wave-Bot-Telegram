@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.error import Forbidden, RetryAfter, TimedOut, NetworkError
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ConversationHandler, ContextTypes, MessageHandler, filters
 
 from config import (
     BOT_TOKEN, AMO_SUBDOMAIN, HOT_STATUSES, ADMIN_IDS,
@@ -20,6 +20,7 @@ from db import (
     mark_skipped, get_skipped,
     is_available, set_availability,
     mark_connected, get_connected,
+    get_all_max_leads_overrides, set_max_leads_override,
 )
 from sheets import fetch_managers, warmup
 
@@ -121,6 +122,8 @@ def sorted_queue(exclude: list[str] = None, managers: dict = None) -> list[str]:
     )
     sent_map = {r['manager_id']: r['cnt'] for r in sent_rows} if sent_rows else {}
 
+    overrides = get_all_max_leads_overrides()
+
     queue = []
     for tg_id, info in managers.items():
         if tg_id in exclude:
@@ -129,7 +132,7 @@ def sorted_queue(exclude: list[str] = None, managers: dict = None) -> list[str]:
             continue
         taken     = taken_map.get(tg_id, 0)
         pending   = sent_map.get(tg_id, 0)
-        max_leads = info['max_leads']
+        max_leads = overrides[tg_id] if tg_id in overrides else info['max_leads']
         # Пропускаємо якщо вже є персональна (неприйнята) заявка
         if pending > 0:
             continue
@@ -482,7 +485,7 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [
                 [KeyboardButton("👥 Статус менеджерів"), KeyboardButton("📊 Черга")],
                 [KeyboardButton("📅 Статистика день"),  KeyboardButton("📆 Статистика місяць")],
-                [KeyboardButton("📋 Активні заявки")],
+                [KeyboardButton("📋 Активні заявки"),   KeyboardButton("⚙️ Ліміти")],
                 [KeyboardButton("🔌 Підключення")],
             ],
             resize_keyboard=True,
@@ -515,7 +518,9 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
             taken     = get_taken(tg_id, month)
             info      = managers.get(tg_id, {})
-            max_leads = info.get('max_leads')
+            _ov       = get_all_max_leads_overrides()
+            max_leads = _ov[tg_id] if tg_id in _ov else info.get('max_leads')
+            lim_mark  = " ✏️" if tg_id in _ov else ""
             at_limit  = max_leads is not None and taken >= max_leads
             in_queue  = tg_id in managers and avail_map.get(tg_id, False) and not at_limit
             conv      = info.get('conversion', 0)
@@ -523,7 +528,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             hot_taken = info.get('hot_taken', '?')
             if at_limit:
                 lines.append(
-                    f"⛔ {name} — ліміт вичерпано ({taken}/{max_leads}) | "
+                    f"⛔ {name} — ліміт вичерпано ({taken}/{max_leads}{lim_mark}) | "
                     f"конв. {conv}% | оплат: {payments} | лідів: {hot_taken}"
                 )
             elif not in_queue:
@@ -532,7 +537,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"(конв. {conv}% | оплат: {payments} | лідів: {hot_taken})"
                 )
             else:
-                limit_str = '∞' if max_leads is None else str(max_leads)
+                limit_str = '∞' if max_leads is None else f"{max_leads}{lim_mark}"
                 basis     = f"конв. {conv}%" if payments else f"лідів: {hot_taken}"
                 lines.append(
                     f"✅ {name} — взяв: {taken}/{limit_str} | {basis} | оплат: {payments}"
@@ -755,6 +760,111 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+# ─── CONVERSATION: ЛІМІТИ МЕНЕДЖЕРІВ ────────────────────────────────────────
+
+LIMIT_SELECT, LIMIT_INPUT = range(2)
+
+ADMIN_KB = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("👥 Статус менеджерів"), KeyboardButton("📊 Черга")],
+        [KeyboardButton("📅 Статистика день"),  KeyboardButton("📆 Статистика місяць")],
+        [KeyboardButton("📋 Активні заявки"),   KeyboardButton("⚙️ Ліміти")],
+        [KeyboardButton("🔌 Підключення")],
+    ],
+    resize_keyboard=True,
+    is_persistent=True,
+)
+
+
+async def limits_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in ADMIN_IDS:
+        return ConversationHandler.END
+
+    managers  = fetch_managers()
+    overrides = get_all_max_leads_overrides()
+
+    buttons = []
+    for tg_id, info in managers.items():
+        name     = info['name']
+        override = overrides.get(tg_id)
+        if override is not None:
+            lim_str = f"{override} ✏️"
+        elif info['max_leads'] is None:
+            lim_str = "∞"
+        else:
+            lim_str = str(info['max_leads'])
+        buttons.append([InlineKeyboardButton(f"{name} — {lim_str}", callback_data=f"setlim:{tg_id}")])
+
+    buttons.append([InlineKeyboardButton("❌ Скасувати", callback_data="setlim:cancel")])
+    await update.message.reply_text(
+        "⚙️ <b>Ліміти менеджерів</b>\n"
+        "Виберіть менеджера для зміни ліміту:\n\n"
+        "<i>✏️ = ручний ліміт | ∞ = без ліміту (з таблиці)</i>",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+    return LIMIT_SELECT
+
+
+async def limits_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "setlim:cancel":
+        await query.edit_message_text("❌ Скасовано")
+        return ConversationHandler.END
+
+    tg_id    = query.data.split(':', 1)[1]
+    managers = fetch_managers()
+    name     = managers.get(tg_id, {}).get('name', tg_id)
+
+    context.user_data['limit_tg_id'] = tg_id
+    context.user_data['limit_name']  = name
+
+    await query.edit_message_text(
+        f"⚙️ Менеджер: <b>{name}</b>\n\n"
+        f"Введіть новий ліміт лідів на день:\n"
+        f"• число (напр. <code>5</code>) — встановити ліміт\n"
+        f"• <code>0</code> — без ліміту (∞, брати з таблиці)\n"
+        f"• /cancel — скасувати",
+        parse_mode='HTML',
+    )
+    return LIMIT_INPUT
+
+
+async def limits_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in ADMIN_IDS:
+        return ConversationHandler.END
+
+    text = update.message.text.strip()
+
+    if not text.isdigit():
+        await update.message.reply_text("⚠️ Введіть ціле число або 0 для скидання ліміту")
+        return LIMIT_INPUT
+
+    value     = int(text)
+    tg_id     = context.user_data.get('limit_tg_id')
+    name      = context.user_data.get('limit_name', tg_id)
+    max_leads = None if value == 0 else value
+
+    set_max_leads_override(tg_id, max_leads)
+
+    lim_str = "∞ (без ліміту, з таблиці)" if max_leads is None else str(max_leads)
+    await update.message.reply_text(
+        f"✅ Ліміт для <b>{name}</b> встановлено: <b>{lim_str}</b>",
+        parse_mode='HTML',
+        reply_markup=ADMIN_KB,
+    )
+    return ConversationHandler.END
+
+
+async def limits_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Скасовано", reply_markup=ADMIN_KB)
+    return ConversationHandler.END
+
+
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
 
@@ -785,7 +895,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action in ('take', 't'):
             # Перевіряємо ліміт перед взяттям
             mgr_info  = managers.get(manager_id, {})
-            max_leads = mgr_info.get('max_leads')
+            _ov       = get_all_max_leads_overrides()
+            max_leads = _ov[manager_id] if manager_id in _ov else mgr_info.get('max_leads')
             if max_leads is not None:
                 taken_today = get_taken(manager_id, day_key())
                 if taken_today >= max_leads:
@@ -806,7 +917,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Перевіряємо чи менеджер досяг ліміту
             managers_info = fetch_managers()
             info      = managers_info.get(manager_id, {})
-            max_leads = info.get('max_leads')
+            _ov2      = get_all_max_leads_overrides()
+            max_leads = _ov2[manager_id] if manager_id in _ov2 else info.get('max_leads')
             if max_leads is not None:
                 taken_today = get_taken(manager_id, day_key())
                 if taken_today >= max_leads:
@@ -866,6 +978,15 @@ async def lifespan(fastapi: FastAPI):
     _app.add_handler(MessageHandler(
         filters.TEXT & filters.Regex(r'^(✅ Увійти в чергу|🚫 Вийти з черги)$'),
         on_work_button,
+    ))
+    _app.add_handler(ConversationHandler(
+        entry_points=[MessageHandler(filters.TEXT & filters.Regex(r'^⚙️ Ліміти$'), limits_start)],
+        states={
+            LIMIT_SELECT: [CallbackQueryHandler(limits_select, pattern=r'^setlim:')],
+            LIMIT_INPUT:  [MessageHandler(filters.TEXT & ~filters.COMMAND, limits_input)],
+        },
+        fallbacks=[CommandHandler('cancel', limits_cancel)],
+        per_user=True,
     ))
     _app.add_handler(MessageHandler(
         filters.TEXT & filters.Regex(

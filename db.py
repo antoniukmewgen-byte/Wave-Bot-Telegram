@@ -93,6 +93,7 @@ def _migrate():
     migrations = [
         "ALTER TABLE leads ADD COLUMN last_rebroadcast_at REAL",
         "ALTER TABLE leads ADD COLUMN taken_at REAL",
+        "ALTER TABLE availability ADD COLUMN max_leads INTEGER",
     ]
     with sqlite3.connect(DB_PATH) as c:
         for sql in migrations:
@@ -139,6 +140,19 @@ def get_all_availability() -> dict:
     """Повертає {manager_id: bool} одним запитом."""
     rows = q("SELECT manager_id, is_active FROM availability", fetch='all')
     return {r['manager_id']: bool(r['is_active']) for r in rows} if rows else {}
+
+
+def get_all_max_leads_overrides() -> dict:
+    """Повертає {manager_id: max_leads} для менеджерів з ручним лімітом."""
+    rows = q("SELECT manager_id, max_leads FROM availability WHERE max_leads IS NOT NULL", fetch='all')
+    return {r['manager_id']: r['max_leads'] for r in rows} if rows else {}
+
+
+def set_max_leads_override(manager_id: str, max_leads):
+    """Встановлює або скидає ручний ліміт. max_leads=None → скинути (брати з таблиці)."""
+    q("""INSERT INTO availability (manager_id, is_active, max_leads) VALUES (?, 0, ?)
+         ON CONFLICT(manager_id) DO UPDATE SET max_leads=?""",
+      (manager_id, max_leads, max_leads))
 
 
 def inc_taken(manager_id: str, month: str):
