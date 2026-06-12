@@ -876,7 +876,7 @@ async def amocrm_webhook(request: Request):
     else:
         header = '📋 НОВА ЗАЯВКА'
     lead_url = f"https://{AMO_SUBDOMAIN}.kommo.com/leads/detail/{lead_id}"
-    title    = f"{header}\n🔗 <a href='{lead_url}'>Угода #{lead_id}</a>"
+    title    = f'{header}\n🔗 <a href="{lead_url}">Угода #{lead_id}</a>'
 
     try:
         q("INSERT INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
