@@ -571,7 +571,10 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'no_managers': '⚠️ Немає менеджерів',
             }
             status_str = status_map.get(lead['status'], lead['status'])
-            mgr        = managers.get(lead['manager_id'] or '', {}).get('name', '—')
+            if lead['status'] == 'broadcast':
+                mgr = '—'
+            else:
+                mgr = managers.get(lead['manager_id'] or '', {}).get('name', '—')
             lines.append(
                 f"{lead['title']}\n"
                 f"{status_str}\n"
