@@ -1004,6 +1004,13 @@ async def lifespan(fastapi: FastAPI):
 
     await _app.initialize()
     await _app.start()
+
+    from telegram import BotCommand, MenuButtonCommands
+    await _app.bot.set_my_commands([
+        BotCommand('start', '🔄 Головне меню / перезапуск'),
+    ])
+    await _app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+
     loop = asyncio.get_event_loop()
     loop.run_in_executor(None, warmup)
     asyncio.create_task(_app.updater.start_polling(allowed_updates=Update.ALL_TYPES))
