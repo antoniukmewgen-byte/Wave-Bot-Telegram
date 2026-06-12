@@ -508,6 +508,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "👥 Статус менеджерів":
         connected_ids = {r['manager_id'] for r in get_connected()}
         avail_map     = get_all_availability()
+        overrides     = get_all_max_leads_overrides()
         lines = ["👥 <b>Статус менеджерів:</b>\n"]
         for name, tg_id in MANAGERS.items():
             if tg_id == '0':
@@ -518,9 +519,8 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
             taken     = get_taken(tg_id, month)
             info      = managers.get(tg_id, {})
-            _ov       = get_all_max_leads_overrides()
-            max_leads = _ov[tg_id] if tg_id in _ov else info.get('max_leads')
-            lim_mark  = " ✏️" if tg_id in _ov else ""
+            max_leads = overrides[tg_id] if tg_id in overrides else info.get('max_leads')
+            lim_mark  = " ✏️" if tg_id in overrides else ""
             at_limit  = max_leads is not None and taken >= max_leads
             in_queue  = tg_id in managers and avail_map.get(tg_id, False) and not at_limit
             conv      = info.get('conversion', 0)
@@ -894,8 +894,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     managers = fetch_managers()
     mgr_name = managers.get(manager_id, {}).get('name', query.from_user.first_name or manager_id)
 
-    await query.answer()
-
     try:
         if action in ('take', 't'):
             # Перевіряємо ліміт перед взяттям
@@ -910,9 +908,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
 
             if not take_lead(lead_id, manager_id, day_key()):
+                await query.answer("❌ Заявку вже взяв інший менеджер", show_alert=True)
                 await edit_msg(manager_id, lead_id, "❌ Заявку вже взяв інший менеджер")
                 return
 
+            await query.answer()
             await edit_msg(manager_id, lead_id, f"✅ Ви взяли заявку в роботу!\n\n{lead['title']}")
             await remove_from_others(lead_id, except_id=manager_id,
                                      note=f"✅ Заявку взяв(ла) <b>{mgr_name}</b>")
@@ -934,6 +934,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
 
         elif action in ('skip', 's'):
+            await query.answer()
             mark_skipped(lead_id, manager_id)
             await edit_msg(manager_id, lead_id, f"⏭ Ви відмовились від заявки\n\n{lead['title']}")
 
@@ -944,6 +945,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"Заявка {lead_id} відхилена {mgr_name}")
 
         elif action in ('dup', 'd'):
+            await query.answer()
             q("UPDATE leads SET status='duplicate' WHERE lead_id=?", (lead_id,))
             await edit_msg(manager_id, lead_id, "🔁 Ви позначили заявку як дубль")
             await remove_from_others(lead_id, except_id=manager_id,
