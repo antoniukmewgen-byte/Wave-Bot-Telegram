@@ -868,6 +868,11 @@ async def limits_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
 
+    # Ігноруємо callbacks від ConversationHandler лімітів
+    if query.data.startswith('setlim:'):
+        await query.answer()
+        return
+
     try:
         action, lead_id = query.data.split(':', 1)
     except ValueError:
