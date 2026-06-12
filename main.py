@@ -20,7 +20,7 @@ from db import (
     mark_skipped, get_skipped,
     is_available, set_availability,
     mark_connected, get_connected,
-    get_all_max_leads_overrides, set_max_leads_override,
+    get_all_max_leads_overrides, set_max_leads_override, reset_all_limit_overrides,
 )
 from sheets import fetch_managers, warmup
 
@@ -339,17 +339,27 @@ async def rebroadcast_periodic(lead_id: str, title: str):
 async def scheduler_loop():
     """Фонова задача: перевіряє застарілі заявки кожні SCHEDULER_TICK секунд."""
     last_cleanup = datetime.now().month
+    last_day     = datetime.now().day
     while True:
         await asyncio.sleep(SCHEDULER_TICK)
         try:
             await _tick()
-            now_month = datetime.now().month
-            if now_month != last_cleanup:
+            now = datetime.now()
+            if now.day != last_day:
+                _reset_limit_overrides()
+                last_day = now.day
+            if now.month != last_cleanup:
                 _cleanup_old_records()
-                last_cleanup = now_month
+                last_cleanup = now.month
         except Exception as e:
             logger.error(f"Scheduler помилка: {e}")
             await notify_admin_error("scheduler (фоновий планувальник)", e)
+
+
+def _reset_limit_overrides():
+    """Скидає всі ручні ліміти на початку нового дня."""
+    reset_all_limit_overrides()
+    logger.info("Ручні ліміти скинуто (новий день)")
 
 
 def _cleanup_old_records():

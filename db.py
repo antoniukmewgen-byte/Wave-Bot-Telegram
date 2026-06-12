@@ -155,6 +155,11 @@ def set_max_leads_override(manager_id: str, max_leads):
       (manager_id, max_leads, max_leads))
 
 
+def reset_all_limit_overrides():
+    """Скидає всі ручні ліміти о опівночі."""
+    q("UPDATE availability SET max_leads=NULL WHERE max_leads IS NOT NULL")
+
+
 def inc_taken(manager_id: str, month: str):
     q("""INSERT INTO stats (manager_id, month, taken) VALUES (?,?,1)
          ON CONFLICT(manager_id, month) DO UPDATE SET taken = taken + 1""",
