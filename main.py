@@ -812,8 +812,8 @@ async def sync_from_kommo() -> tuple[int, int]:
     async with aiohttp.ClientSession() as session:
         while True:
             params = {
-                "filter[pipeline_id]": "10815171",
-                "filter[status_id]":   "85731907",
+                "filter[statuses][0][pipeline_id]": "10815171",
+                "filter[statuses][0][status_id]":   "85731907",
                 "limit": 250,
                 "page":  page,
             }
