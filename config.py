@@ -15,6 +15,7 @@ ADMIN_IDS      = [i.strip() for i in os.environ.get('ADMIN_IDS', '').split(',') 
 COL_MANAGER    = 0
 COL_YEAR       = 2
 COL_MONTH      = 3
+COL_PLAN       = 22   # W  — план обіг
 COL_HOT_TAKEN  = 24   # Y  — взято гарячих лідів
 COL_PAYMENTS   = 35   # AJ — к-ть проданих консультацій
 COL_CONVERSION = 36   # AK — конверсія %

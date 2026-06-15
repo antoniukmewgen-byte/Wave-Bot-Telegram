@@ -8,7 +8,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 from config import (
     SHEETS_ID, SHEET_NAME, GOOGLE_CREDS, MANAGERS,
-    COL_MANAGER, COL_YEAR, COL_MONTH, COL_CONVERSION,
+    COL_MANAGER, COL_YEAR, COL_MONTH, COL_PLAN, COL_CONVERSION,
     COL_PAYMENTS, COL_HOT_TAKEN,
     CONV_UNLIMITED, CONV_MAX5_MIN, CONV_MAX2_MIN,
     LEADS_UNLIM_MAX, LEADS_MAX5_MAX, LEADS_MAX2_MAX,
@@ -126,6 +126,11 @@ def fetch_managers() -> Dict[str, dict]:
 
                 payments  = _int_col(row, COL_PAYMENTS)
                 hot_taken = _int_col(row, COL_HOT_TAKEN)
+
+                # Якщо колонка W (План обіг) порожня — менеджер поза чергою
+                plan_raw = row[COL_PLAN].strip().replace(' ', '').replace('\xa0', '').replace('$', '').replace(',', '') if len(row) > COL_PLAN else ''
+                if not plan_raw or plan_raw == '0':
+                    continue
 
                 if payments == 0:
                     # Гілка «0 оплат» — ліміт за к-тю взятих лідів
