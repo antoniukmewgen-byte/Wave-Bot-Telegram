@@ -1046,23 +1046,39 @@ async def amocrm_webhook(request: Request):
         return {'ok': True}
 
     lead_id     = (data.get('leads[status][0][id]')
-                   or data.get('leads[add][0][id]'))
+                   or data.get('leads[add][0][id]')
+                   or data.get('leads[delete][0][id]'))
     status_id   = (data.get('leads[status][0][status_id]')
                    or data.get('leads[add][0][status_id]'))
     pipeline_id = (data.get('leads[status][0][pipeline_id]')
                    or data.get('leads[add][0][pipeline_id]'))
+    is_delete   = bool(data.get('leads[delete][0][id]'))
 
-    logger.info(f"Webhook: lead_id={lead_id} status_id={status_id} pipeline_id={pipeline_id} keys={list(data.keys())[:6]}")
+    logger.info(f"Webhook: lead_id={lead_id} status_id={status_id} pipeline_id={pipeline_id} delete={is_delete} keys={list(data.keys())[:6]}")
 
     if not lead_id:
+        return {'ok': True}
+
+    # Заявку видалено в CRM — закриваємо в боті
+    if is_delete:
+        lead = get_lead(lead_id)
+        if lead and lead['status'] not in ('taken', 'duplicate', 'closed'):
+            q("UPDATE leads SET status='closed' WHERE lead_id=?", (lead_id,))
+            await remove_from_others(lead_id, note="🗑 Заявку видалено в CRM")
+            logger.info(f"Webhook: заявка {lead_id} видалена в CRM → закрито в боті")
         return {'ok': True}
 
     if str(pipeline_id) != '10815171':
         logger.info(f"Webhook: ігноруємо pipeline_id={pipeline_id} (не наша воронка)")
         return {'ok': True}
 
+    # Заявка перейшла на інший етап — закриваємо в боті
     if str(status_id) != '85731907':
-        logger.info(f"Webhook: ігноруємо status_id={status_id} (не наш етап)")
+        lead = get_lead(lead_id)
+        if lead and lead['status'] not in ('taken', 'duplicate', 'closed'):
+            q("UPDATE leads SET status='closed' WHERE lead_id=?", (lead_id,))
+            await remove_from_others(lead_id, note="📋 Заявку переміщено на інший етап в CRM")
+            logger.info(f"Webhook: заявка {lead_id} змінила статус → закрито в боті")
         return {'ok': True}
 
     if get_lead(lead_id):
