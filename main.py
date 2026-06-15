@@ -4,13 +4,14 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
+import aiohttp
 from fastapi import FastAPI, Request
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.error import Forbidden, RetryAfter, TimedOut, NetworkError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ConversationHandler, ContextTypes, MessageHandler, filters
 
 from config import (
-    BOT_TOKEN, AMO_SUBDOMAIN, HOT_STATUSES, ADMIN_IDS,
+    BOT_TOKEN, AMO_SUBDOMAIN, AMO_TOKEN, HOT_STATUSES, ADMIN_IDS,
     TIMEOUT_PERSONAL, TIMEOUT_WARN, TIMEOUT_SOS, TIMEOUT_REBROADCAST,
     SCHEDULER_TICK, MANAGERS, WEBHOOK_PATH,
 )
@@ -496,7 +497,7 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [KeyboardButton("👥 Статус менеджерів"), KeyboardButton("📊 Черга")],
                 [KeyboardButton("📅 Статистика день"),  KeyboardButton("📆 Статистика місяць")],
                 [KeyboardButton("📋 Активні заявки"),   KeyboardButton("⚙️ Ліміти")],
-                [KeyboardButton("🔌 Підключення")],
+                [KeyboardButton("🔄 Синхронізація"),    KeyboardButton("🔌 Підключення")],
             ],
             resize_keyboard=True,
             is_persistent=True,
@@ -768,6 +769,96 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"{i}. {name} — взяв: {taken}")
         await send_long(update.message, '\n'.join(lines))
 
+    elif text == "🔄 Синхронізація":
+        if not AMO_TOKEN:
+            await update.message.reply_text(
+                "⚠️ <b>AMO_TOKEN не налаштовано</b>\n"
+                "Додайте токен Kommo API в .env файл на сервері:\n"
+                "<code>AMO_TOKEN=ваш_токен</code>",
+                parse_mode='HTML',
+            )
+            return
+        msg = await update.message.reply_text("🔄 Синхронізація... зачекайте")
+        try:
+            added, skipped = await sync_from_kommo()
+            await msg.edit_text(
+                f"✅ <b>Синхронізацію завершено</b>\n"
+                f"➕ Додано нових: <b>{added}</b>\n"
+                f"⏭ Вже були в системі: <b>{skipped}</b>",
+                parse_mode='HTML',
+            )
+        except Exception as e:
+            await msg.edit_text(f"❌ Помилка синхронізації: {e}")
+            logger.error(f"Sync error: {e}")
+
+
+
+# ─── СИНХРОНІЗАЦІЯ З KOMMO ───────────────────────────────────────────────────
+
+async def sync_from_kommo() -> tuple[int, int]:
+    """
+    Тягне всі заявки з потрібного pipeline/статусу через Kommo API.
+    Повертає (додано, пропущено).
+    """
+    if not AMO_TOKEN:
+        return 0, 0
+
+    url     = f"https://{AMO_SUBDOMAIN}.kommo.com/api/v4/leads"
+    headers = {"Authorization": f"Bearer {AMO_TOKEN}"}
+    added   = 0
+    skipped = 0
+    page    = 1
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            params = {
+                "filter[pipeline_id]": "10815171",
+                "filter[status_id]":   "85731907",
+                "limit": 250,
+                "page":  page,
+            }
+            async with session.get(url, headers=headers, params=params) as resp:
+                if resp.status == 204:  # немає більше записів
+                    break
+                if resp.status != 200:
+                    logger.error(f"Kommo sync: HTTP {resp.status}")
+                    break
+                data  = await resp.json()
+                leads = data.get("_embedded", {}).get("leads", [])
+                if not leads:
+                    break
+
+                for lead in leads:
+                    lead_id = str(lead["id"])
+                    if get_lead(lead_id):
+                        skipped += 1
+                        continue
+
+                    raw_label = HOT_STATUSES.get("85731907", "Нова заявка")
+                    if "Гаряча" in raw_label:
+                        header = "🔥 ГАРЯЧА ЗАЯВКА"
+                    elif "Кваліфікована" in raw_label:
+                        header = "⭐ КВАЛІФІКОВАНА ЗАЯВКА"
+                    else:
+                        header = "📋 НОВА ЗАЯВКА"
+
+                    lead_url = f"https://{AMO_SUBDOMAIN}.kommo.com/leads/detail/{lead_id}"
+                    title    = f'{header}\n🔗 <a href="{lead_url}">Угода #{lead_id}</a>'
+                    created  = lead.get("created_at", datetime.now().timestamp())
+
+                    try:
+                        q("INSERT INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
+                          (lead_id, "queued", created, title))
+                        asyncio.create_task(assign_next(lead_id))
+                        added += 1
+                    except Exception as e:
+                        logger.error(f"Kommo sync: не вдалось додати {lead_id}: {e}")
+
+                if len(leads) < 250:
+                    break
+                page += 1
+
+    return added, skipped
 
 
 # ─── CONVERSATION: ЛІМІТИ МЕНЕДЖЕРІВ ────────────────────────────────────────
@@ -779,7 +870,7 @@ ADMIN_KB = ReplyKeyboardMarkup(
         [KeyboardButton("👥 Статус менеджерів"), KeyboardButton("📊 Черга")],
         [KeyboardButton("📅 Статистика день"),  KeyboardButton("📆 Статистика місяць")],
         [KeyboardButton("📋 Активні заявки"),   KeyboardButton("⚙️ Ліміти")],
-        [KeyboardButton("🔌 Підключення")],
+        [KeyboardButton("🔄 Синхронізація"),    KeyboardButton("🔌 Підключення")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -1009,7 +1100,7 @@ async def lifespan(fastapi: FastAPI):
     ))
     _app.add_handler(MessageHandler(
         filters.TEXT & filters.Regex(
-            r'^(👥 Статус менеджерів|📊 Черга|🔌 Підключення|📋 Активні заявки|📅 Статистика день|📆 Статистика місяць)$'
+            r'^(👥 Статус менеджерів|📊 Черга|🔌 Підключення|📋 Активні заявки|📅 Статистика день|📆 Статистика місяць|🔄 Синхронізація)$'
         ),
         on_admin_button,
     ))
