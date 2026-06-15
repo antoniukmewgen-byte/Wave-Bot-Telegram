@@ -172,7 +172,7 @@ def take_lead(lead_id: str, manager_id: str, month: str) -> bool:
     try:
         cur = conn.execute(
             "UPDATE leads SET status='taken', manager_id=?, taken_at=? "
-            "WHERE lead_id=? AND status NOT IN ('taken','duplicate')",
+            "WHERE lead_id=? AND status NOT IN ('taken','duplicate','closed')",
             (manager_id, datetime.now().timestamp(), lead_id),
         )
         if cur.rowcount == 0:

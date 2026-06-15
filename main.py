@@ -87,11 +87,6 @@ async def notify_admin_error(where: str, error: Exception, manager_id: str = Non
 
 # ─── УТИЛІТИ ─────────────────────────────────────────────────────────────────
 
-def month_key() -> str:
-    d = datetime.now()
-    return f"{d.year}-{d.month:02d}"
-
-
 def day_key() -> str:
     d = datetime.now()
     return f"{d.year}-{d.month:02d}-{d.day:02d}"
@@ -277,7 +272,7 @@ async def assign_next(lead_id: str, exclude: list[str] = None):
 async def broadcast_to_all(lead_id: str):
     """Розіслати заявку всім вільним менеджерам (хто перший — того й тапки)."""
     lead = get_lead(lead_id)
-    if not lead or lead['status'] in ('taken', 'duplicate'):
+    if not lead or lead['status'] in ('taken', 'duplicate', 'closed'):
         return
 
     orig_manager = lead['manager_id']
@@ -297,6 +292,9 @@ async def broadcast_to_all(lead_id: str):
 
 
 async def escalate_warn(lead_id: str, title: str):
+    lead = get_lead(lead_id)
+    if not lead or lead['status'] in ('taken', 'duplicate', 'closed'):
+        return
     warn = (
         f"⚠️⚠️⚠️ <b>ТЕРМІНОВО!</b>\n"
         f"Заявка вже <b>5 хвилин</b> без відповіді!\n\n{title}"
@@ -309,6 +307,9 @@ async def escalate_warn(lead_id: str, title: str):
 
 
 async def escalate_sos(lead_id: str, title: str):
+    lead = get_lead(lead_id)
+    if not lead or lead['status'] in ('taken', 'duplicate', 'closed'):
+        return
     sos = (
         f"🆘🚨💀🔴 <b>SOS!!! ЗАЯВКА 10 ХВИЛИН!!!</b> 🔴💀🚨🆘\n"
         f"😱🔥💥 ХТОСЬ ВІЗЬМІТЬ ВЖЕ! 💥🔥😱\n\n{title}"
@@ -323,6 +324,9 @@ async def escalate_sos(lead_id: str, title: str):
 
 async def rebroadcast_periodic(lead_id: str, title: str):
     """Повторна розсилка кожні 30 хв після SOS — до тих пір, поки заявку не візьмуть."""
+    lead = get_lead(lead_id)
+    if not lead or lead['status'] in ('taken', 'duplicate', 'closed'):
+        return
     msg = (
         f"🔄 <b>Заявка досі не взята!</b>\n"
         f"⏰ Повторна розсилка — будь ласка, візьміть в роботу!\n\n{title}"
@@ -520,6 +524,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         connected_ids = {r['manager_id'] for r in get_connected()}
         avail_map     = get_all_availability()
         overrides     = get_all_max_leads_overrides()
+        taken_map     = get_all_taken(month)
         lines = ["👥 <b>Статус менеджерів:</b>\n"]
         for name, tg_id in MANAGERS.items():
             if tg_id == '0':
@@ -528,7 +533,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if tg_id not in connected_ids:
                 lines.append(f"❌ {name} — ще не підключився")
                 continue
-            taken     = get_taken(tg_id, month)
+            taken     = taken_map.get(tg_id, 0)
             info      = managers.get(tg_id, {})
             max_leads = overrides[tg_id] if tg_id in overrides else info.get('max_leads')
             lim_mark  = " ✏️" if tg_id in overrides else ""
@@ -686,6 +691,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "📆 Статистика місяць":
         now_dt      = datetime.now()
         month_start = now_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
+        month_label = now_dt.strftime('%m.%Y')
 
         month_rows = q(
             "SELECT * FROM leads WHERE created_at >= ? ORDER BY created_at",
@@ -694,7 +700,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not month_rows:
             await update.message.reply_text(
-                f"📆 <b>За місяць ({month})</b>\n\nЗаявок ще не було.",
+                f"📆 <b>За місяць ({month_label})</b>\n\nЗаявок ще не було.",
                 parse_mode='HTML',
             )
             return
@@ -735,7 +741,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not m_rows:
             await update.message.reply_text(
-                f"📆 <b>За місяць ({month})</b>\n\nЗаявок ще не взято.",
+                f"📆 <b>За місяць ({month_label})</b>\n\nЗаявок ще не взято.",
                 parse_mode='HTML',
             )
             return
@@ -747,14 +753,14 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         def fmt_m(cols):
             return " | ".join(c.ljust(w) for c, w in zip(cols, m_col_w))
 
-        await update.message.reply_text(
-            f"📆 <b>За місяць ({month})</b>\n"
+        await send_long(
+            update.message,
+            f"📆 <b>За місяць ({month_label})</b>\n"
             f"Всього: {len(month_rows)} | Взято: {total_taken} | "
             f"Не взято: {not_taken_total} | Сер. реакція: {overall_avg}\n\n"
             f"<pre>{fmt_m(m_headers)}\n"
             f"{'-+-'.join('-' * w for w in m_col_w)}\n"
             f"{chr(10).join(fmt_m(r) for r in m_rows)}</pre>",
-            parse_mode='HTML',
         )
 
     elif text == "📊 Черга":
@@ -762,10 +768,11 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not queue:
             await update.message.reply_text("😶 Черга порожня — немає вільних менеджерів")
             return
+        taken_map_q = get_all_taken(month)
         lines = ["📊 <b>Поточна черга:</b>\n"]
         for i, tg_id in enumerate(queue, 1):
             name  = managers.get(tg_id, {}).get('name', tg_id)
-            taken = get_taken(tg_id, month)
+            taken = taken_map_q.get(tg_id, 0)
             lines.append(f"{i}. {name} — взяв: {taken}")
         await send_long(update.message, '\n'.join(lines))
 
@@ -844,13 +851,13 @@ async def sync_from_kommo() -> tuple[int, int]:
 
                     lead_url = f"https://{AMO_SUBDOMAIN}.kommo.com/leads/detail/{lead_id}"
                     title    = f'{header}\n🔗 <a href="{lead_url}">Угода #{lead_id}</a>'
-                    created  = lead.get("created_at", datetime.now().timestamp())
+                    created  = datetime.now().timestamp()  # використовуємо час синхронізації, а не оригінальний created_at, щоб уникнути негайної ескалації старих заявок
 
                     try:
                         q("INSERT INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
                           (lead_id, "queued", created, title))
-                        asyncio.create_task(assign_next(lead_id))
                         added += 1
+                        # Планувальник підхопить заявку протягом SCHEDULER_TICK секунд
                     except Exception as e:
                         logger.error(f"Kommo sync: не вдалось додати {lead_id}: {e}")
 
@@ -981,7 +988,33 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     manager_id = str(query.from_user.id)
-    lead       = get_lead(lead_id)
+
+    # ── work:on / work:off — не потребує lead lookup ──────────────────────────
+    if action == 'work':
+        try:
+            name = MANAGERS_BY_ID.get(manager_id)
+            if not name:
+                await query.answer()
+                return
+            active = (lead_id == 'on')
+            set_availability(manager_id, active)
+            await query.answer()
+            status = "✅ Ви в черзі — заявки надходитимуть" if active else "🚫 Ви вийшли з черги — заявки не надходитимуть"
+            await query.edit_message_text(
+                f"👤 <b>{name}</b>\n\n{status}\n\nЩоб змінити — напишіть /work",
+                reply_markup=work_keyboard(active),
+                parse_mode='HTML',
+            )
+            logger.info(f"{name} {'увійшов в чергу' if active else 'вийшов з черги'}")
+        except Exception as e:
+            logger.error(f"on_callback work: {e}")
+            try:
+                await query.answer()
+            except Exception:
+                pass
+        return
+
+    lead = get_lead(lead_id)
 
     if not lead:
         await query.answer("⚠️ Заявка не знайдена", show_alert=True)
@@ -1040,7 +1073,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await edit_msg(manager_id, lead_id, f"⏭ Ви відмовились від заявки\n\n{lead['title']}")
 
             lead = get_lead(lead_id)
-            if lead['status'] == 'sent':
+            if lead and lead['status'] == 'sent':
                 q("UPDATE leads SET status='queued', manager_id=NULL WHERE lead_id=?", (lead_id,))
                 await assign_next(lead_id, exclude=get_skipped(lead_id))
             logger.info(f"Заявка {lead_id} відхилена {mgr_name}")
@@ -1053,22 +1086,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                      note="🔁 Заявка закрита як дубль")
             logger.info(f"Заявка {lead_id} — дубль ({mgr_name})")
 
-        elif action == 'work':
-            name = MANAGERS_BY_ID.get(manager_id)
-            if not name:
-                return
-            active = (lead_id == 'on')
-            set_availability(manager_id, active)
-            status = "✅ Ви в черзі — заявки надходитимуть" if active else "🚫 Ви вийшли з черги — заявки не надходитимуть"
-            await query.edit_message_text(
-                f"👤 <b>{name}</b>\n\n{status}\n\nЩоб змінити — напишіть /work",
-                reply_markup=work_keyboard(active),
-                parse_mode='HTML',
-            )
-            logger.info(f"{name} {'увійшов в чергу' if active else 'вийшов з черги'}")
+        else:
+            await query.answer()
 
     except Exception as e:
         logger.error(f"on_callback {action} {lead_id}: {e}")
+        try:
+            await query.answer()
+        except Exception:
+            pass
         await notify_admin_error(f"on_callback (дія: {action}, заявка: {lead_id})", e, manager_id)
 
 
