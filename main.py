@@ -610,7 +610,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         today_str   = now_dt.strftime('%d.%m.%Y')
 
         today_rows = q(
-            "SELECT * FROM leads WHERE created_at >= ? ORDER BY created_at",
+            "SELECT * FROM leads WHERE created_at >= ? AND status != 'closed' ORDER BY created_at",
             (today_start,), fetch='all',
         )
 
@@ -694,7 +694,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         month_label = now_dt.strftime('%m.%Y')
 
         month_rows = q(
-            "SELECT * FROM leads WHERE created_at >= ? ORDER BY created_at",
+            "SELECT * FROM leads WHERE created_at >= ? AND status != 'closed' ORDER BY created_at",
             (month_start,), fetch='all',
         )
 
