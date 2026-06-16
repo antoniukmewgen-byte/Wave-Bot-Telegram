@@ -567,10 +567,10 @@ async def _handle_manager_status(message, managers: dict):
         if tg_id == '0':
             lines.append(f"❌ {name} — ID не вказано")
             continue
+        if tg_id not in managers:
+            continue
         if tg_id not in connected_ids:
             lines.append(f"❌ {name} — ще не підключився")
-            continue
-        if tg_id not in managers:
             continue
         taken     = taken_map.get(tg_id, 0)
         info      = managers.get(tg_id, {})
