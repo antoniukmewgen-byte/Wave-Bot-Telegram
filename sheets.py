@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Dict, Optional
 
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 
 from config import (
     SHEETS_ID, SHEET_NAME, GOOGLE_CREDS, MANAGERS,
@@ -29,15 +29,17 @@ _gc: Optional[gspread.Client] = None
 _ws: Optional[gspread.Worksheet] = None
 
 
+_SCOPES = [
+    'https://spreadsheets.google.com/feeds',
+    'https://www.googleapis.com/auth/drive',
+]
+
+
 def _get_ws() -> gspread.Worksheet:
     """Повертає worksheet, перепідключається якщо сесія протухла."""
     global _gc, _ws
     if _ws is None:
-        scope = [
-            'https://spreadsheets.google.com/feeds',
-            'https://www.googleapis.com/auth/drive',
-        ]
-        creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDS, scope)
+        creds = Credentials.from_service_account_file(GOOGLE_CREDS, scopes=_SCOPES)
         _gc   = gspread.authorize(creds)
         _ws   = _gc.open_by_key(SHEETS_ID).worksheet(SHEET_NAME)
         logger.info("Sheets: підключення встановлено")

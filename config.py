@@ -4,8 +4,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BOT_TOKEN      = os.environ['BOT_TOKEN']
-AMO_SUBDOMAIN  = os.environ.get('AMO_SUBDOMAIN', 'movenation')
-AMO_TOKEN      = os.environ.get('AMO_TOKEN', '')
+AMO_SUBDOMAIN     = os.environ.get('AMO_SUBDOMAIN', 'movenation')
+AMO_TOKEN         = os.environ.get('AMO_TOKEN', '')
+AMO_PIPELINE_ID   = os.environ.get('AMO_PIPELINE_ID', '10815171')
+AMO_HOT_STATUS_ID = os.environ.get('AMO_HOT_STATUS_ID', '85731907')
 WEBHOOK_PATH   = os.environ.get('WEBHOOK_PATH', 'movenation')
 SHEETS_ID      = os.environ['SHEETS_ID']
 SHEET_NAME     = os.environ.get('SHEET_NAME', 'План|Факт|Мотивація Мдж')

@@ -150,7 +150,7 @@ def get_all_max_leads_overrides() -> dict:
 
 def set_max_leads_override(manager_id: str, max_leads):
     """Встановлює або скидає ручний ліміт. max_leads=None → скинути (брати з таблиці)."""
-    q("""INSERT INTO availability (manager_id, is_active, max_leads) VALUES (?, 0, ?)
+    q("""INSERT INTO availability (manager_id, is_active, max_leads) VALUES (?, 1, ?)
          ON CONFLICT(manager_id) DO UPDATE SET max_leads=?""",
       (manager_id, max_leads, max_leads))
 
@@ -233,9 +233,10 @@ def set_availability(manager_id: str, active: bool):
 
 
 def mark_connected(manager_id: str, name: str):
+    ts = datetime.now().timestamp()
     q("""INSERT INTO connected (manager_id, name, connected_at) VALUES (?,?,?)
          ON CONFLICT(manager_id) DO UPDATE SET name=?, connected_at=?""",
-      (manager_id, name, datetime.now().timestamp(), name, datetime.now().timestamp()))
+      (manager_id, name, ts, name, ts))
 
 
 def get_connected() -> list:
