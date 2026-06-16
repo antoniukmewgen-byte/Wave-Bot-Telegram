@@ -176,6 +176,61 @@ def fetch_managers() -> Dict[str, dict]:
     return _cache
 
 
+def get_block_reason(tg_id: str) -> Optional[str]:
+    """Повертає причину, чому менеджер не може потрапити в чергу, або None якщо все ок."""
+    try:
+        rows     = _read_rows()
+        now_dt   = datetime.now()
+        year_str = str(now_dt.year)
+        month_str = MONTHS_UA[now_dt.month]
+
+        for row in rows[1:]:
+            if len(row) <= COL_CONVERSION:
+                continue
+            if row[COL_YEAR].strip() != year_str:
+                continue
+            if row[COL_MONTH].strip() != month_str:
+                continue
+
+            name = row[COL_MANAGER].strip()
+            if MANAGERS.get(name) != tg_id:
+                continue
+
+            plan_raw = row[COL_PLAN].strip().replace(' ', '').replace('\xa0', '').replace('$', '').replace(',', '') if len(row) > COL_PLAN else ''
+            if not plan_raw or plan_raw == '0':
+                return "❌ Вам не встановлено план обігу (колонка W порожня). Зверніться до керівника."
+
+            raw = row[COL_CONVERSION].strip().replace('%', '').replace(',', '.').replace(' ', '').replace('\xa0', '')
+            try:
+                conv = float(raw)
+            except (ValueError, TypeError):
+                conv = 0.0
+
+            try:
+                payments = int(float(row[COL_PAYMENTS].strip().replace(' ', '').replace('\xa0', '') or '0')) if len(row) > COL_PAYMENTS else 0
+            except (ValueError, TypeError):
+                payments = 0
+
+            try:
+                hot_taken = int(float(row[COL_HOT_TAKEN].strip().replace(' ', '').replace('\xa0', '') or '0')) if len(row) > COL_HOT_TAKEN else 0
+            except (ValueError, TypeError):
+                hot_taken = 0
+
+            if payments == 0:
+                if hot_taken > LEADS_MAX2_MAX:
+                    return f"❌ Ви взяли {hot_taken} лідів без жодної оплати. Потрібно закрити ліди перед поверненням в чергу."
+            else:
+                if conv < CONV_MAX2_MIN:
+                    return f"❌ Ваша конверсія {conv}% занадто низька (мінімум {CONV_MAX2_MIN}%). Зверніться до керівника."
+
+            return None  # знайдено рядок і всі перевірки пройдені
+
+    except Exception as e:
+        logger.error(f"get_block_reason помилка: {e}")
+
+    return None
+
+
 def warmup():
     """Прогрів кешу при старті — викликати один раз."""
     logger.info("Sheets: прогрів кешу...")

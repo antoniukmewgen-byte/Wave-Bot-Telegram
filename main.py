@@ -24,7 +24,7 @@ from db import (
     mark_connected, get_connected,
     get_all_max_leads_overrides, set_max_leads_override, reset_all_limit_overrides,
 )
-from sheets import fetch_managers, warmup
+from sheets import fetch_managers, get_block_reason, warmup
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)s %(name)s: %(message)s',
@@ -538,6 +538,14 @@ async def on_work_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     active = update.message.text == "✅ Увійти в чергу"
+
+    if active:
+        managers = fetch_managers()
+        if user_id not in managers:
+            reason = get_block_reason(user_id) or "❌ Ви не можете увійти в чергу. Зверніться до керівника."
+            await update.message.reply_text(reason, reply_markup=MANAGER_KB)
+            return
+
     set_availability(user_id, active)
 
     status = "✅ Ви в черзі — заявки надходитимуть" if active else "🚫 Ви вийшли з черги — заявки не надходитимуть"
@@ -561,6 +569,8 @@ async def _handle_manager_status(message, managers: dict):
             continue
         if tg_id not in connected_ids:
             lines.append(f"❌ {name} — ще не підключився")
+            continue
+        if tg_id not in managers:
             continue
         taken     = taken_map.get(tg_id, 0)
         info      = managers.get(tg_id, {})
