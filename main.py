@@ -1073,6 +1073,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if action in ('take', 't'):
+            # Перевіряємо чи менеджер в черзі (активний + пройшов перевірку таблиці)
+            if not is_available(manager_id) or manager_id not in managers:
+                await query.answer("⛔ Ви поза чергою — заявку взяти неможливо", show_alert=True)
+                return
+
             mgr_info  = managers.get(manager_id, {})
             overrides = get_all_max_leads_overrides()
             max_leads = overrides[manager_id] if manager_id in overrides else mgr_info.get('max_leads')
