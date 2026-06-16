@@ -561,6 +561,7 @@ async def _handle_manager_status(message, managers: dict):
     avail_map     = get_all_availability()
     overrides     = get_all_max_leads_overrides()
     taken_map     = get_all_taken(month)
+    sent_map      = _build_sent_map()
 
     lines = ["👥 <b>Статус менеджерів:</b>\n"]
     for name, tg_id in MANAGERS.items():
@@ -577,7 +578,9 @@ async def _handle_manager_status(message, managers: dict):
         max_leads = overrides[tg_id] if tg_id in overrides else info.get('max_leads')
         lim_mark  = " ✏️" if tg_id in overrides else ""
         at_limit  = max_leads is not None and taken >= max_leads
-        in_queue  = tg_id in managers and avail_map.get(tg_id, False) and not at_limit
+        is_active = avail_map.get(tg_id, False)
+        has_pending = sent_map.get(tg_id, 0) > 0
+        in_queue  = is_active and not at_limit
         conv      = info.get('conversion', 0)
         payments  = info.get('payments', '?')
         hot_taken = info.get('hot_taken', '?')
@@ -587,10 +590,16 @@ async def _handle_manager_status(message, managers: dict):
                 f"⛔ {name} — ліміт вичерпано ({taken}/{max_leads}{lim_mark}) | "
                 f"конв. {conv}% | оплат: {payments} | лідів: {hot_taken}"
             )
-        elif not in_queue:
+        elif not is_active:
             lines.append(
                 f"🚫 {name} — поза чергою "
                 f"(конв. {conv}% | оплат: {payments} | лідів: {hot_taken})"
+            )
+        elif has_pending:
+            limit_str = '∞' if max_leads is None else f"{max_leads}{lim_mark}"
+            basis     = f"конв. {conv}%" if payments else f"лідів: {hot_taken}"
+            lines.append(
+                f"📨 {name} — очікує відповіді | взяв: {taken}/{limit_str} | {basis} | оплат: {payments}"
             )
         else:
             limit_str = '∞' if max_leads is None else f"{max_leads}{lim_mark}"
