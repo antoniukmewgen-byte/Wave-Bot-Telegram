@@ -442,16 +442,15 @@ async def _tick():
             continue
 
         # ── Заявки з sent_at — ескалація ──────────────────────────────────────
-        # Рівень 0: особистий таймаут рахується від sent_at (час отримання менеджером)
-        # Рівні 1+: від created_at (повний час без відповіді, відображений у повідомленнях)
-        age_from_sent    = now - sent_at
-        age_from_created = now - lead['created_at']
+        # Всі рівні рахуються від sent_at (оновлюється при кожній розсилці),
+        # тому стара created_at із Kommo не впливає на таймаути.
+        age = now - sent_at
 
-        if lvl == 0 and age_from_sent >= TIMEOUT_PERSONAL:
+        if lvl == 0 and age >= TIMEOUT_PERSONAL:
             await broadcast_to_all(lid, **tick_ctx)
-        elif lvl == 1 and age_from_created >= TIMEOUT_WARN:
+        elif lvl == 1 and age >= TIMEOUT_WARN:
             await escalate_warn(lid, lead['title'], **tick_ctx)
-        elif lvl == 2 and age_from_created >= TIMEOUT_SOS:
+        elif lvl == 2 and age >= TIMEOUT_SOS:
             await escalate_sos(lid, lead['title'], **tick_ctx)
         elif lvl >= 3:
             rb_base = last_rb or sent_at or lead['created_at']
@@ -641,11 +640,18 @@ async def _handle_daily_stats(message):
     today_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     today_str   = now_dt.strftime('%d.%m.%Y')
 
-    today_rows = q(
-        "SELECT * FROM leads WHERE created_at >= ? AND status != 'closed' ORDER BY created_at",
+    # Взяті сьогодні — по taken_at, щоб збігатись з лімітами черги
+    taken_rows = q(
+        "SELECT * FROM leads WHERE taken_at >= ? AND status = 'taken' ORDER BY taken_at",
         (today_start,), fetch='all',
     )
-    if not today_rows:
+    # Активні зараз (ще не взяті)
+    active_count = q(
+        "SELECT COUNT(*) as cnt FROM leads WHERE status NOT IN ('taken','duplicate','closed')",
+        fetch='one',
+    )['cnt']
+
+    if not taken_rows and active_count == 0:
         await message.reply_text(
             f"📅 <b>За сьогодні ({today_str})</b>\n\nЗаявок не було.",
             parse_mode='HTML',
@@ -653,34 +659,19 @@ async def _handle_daily_stats(message):
         return
 
     table_rows = []
-    for lead in today_rows:
-        recv_str = datetime.fromtimestamp(lead['created_at']).strftime('%H:%M')
-        if lead['status'] == 'taken' and lead['taken_at'] and lead['created_at']:
-            reaction_str = f"{max(0, int((lead['taken_at'] - lead['created_at']) / 60))} хв"
-            status_str   = "Взято"
-            mgr_name     = MANAGERS_BY_ID.get(lead['manager_id'], '—')
-        else:
-            reaction_str = "—"
-            status_str   = "Не взято"
-            mgr_name     = "—"
-        table_rows.append((mgr_name, f"#{lead['lead_id']}", recv_str, reaction_str, status_str))
-
-    headers = ["Менеджер", "Заявка", "Отримано", "Реакція", "Статус"]
-    col_w   = [max(len(h), max(len(r[i]) for r in table_rows))
-               for i, h in enumerate(headers)]
-
-    def fmt_row(cols):
-        return " | ".join(c.ljust(w) for c, w in zip(cols, col_w))
-
-    taken_today     = sum(1 for r in today_rows if r['status'] == 'taken')
     mgr_taken_d     = defaultdict(int)
     mgr_reactions_d = defaultdict(list)
-    for lead in today_rows:
-        if lead['status'] == 'taken':
-            mid = lead['manager_id'] or '—'
-            mgr_taken_d[mid] += 1
-            if lead['taken_at'] and lead['created_at']:
-                mgr_reactions_d[mid].append(max(0, int((lead['taken_at'] - lead['created_at']) / 60)))
+
+    for lead in taken_rows:
+        taken_str    = datetime.fromtimestamp(lead['taken_at']).strftime('%H:%M')
+        reaction_min = max(0, int((lead['taken_at'] - lead['created_at']) / 60))
+        reaction_str = f"{reaction_min} хв"
+        mgr_name     = MANAGERS_BY_ID.get(lead['manager_id'], '—')
+        table_rows.append((mgr_name, f"#{lead['lead_id']}", taken_str, reaction_str))
+
+        mid = lead['manager_id'] or '—'
+        mgr_taken_d[mid] += 1
+        mgr_reactions_d[mid].append(reaction_min)
 
     summary_rows = []
     for mgr_name, tg_id in MANAGERS.items():
@@ -690,6 +681,22 @@ async def _handle_daily_stats(message):
         reactions = mgr_reactions_d.get(tg_id, [])
         avg_str = f"{int(sum(reactions)/len(reactions))} хв" if reactions else "—"
         summary_rows.append((mgr_name, str(t), avg_str))
+
+    header_line = (
+        f"📅 <b>За сьогодні ({today_str})</b>\n"
+        f"Взято: {len(taken_rows)} | Активних зараз: {active_count}"
+    )
+
+    if not table_rows:
+        await message.reply_text(header_line + "\n\nЩе ніхто не взяв заявок.", parse_mode='HTML')
+        return
+
+    headers = ["Менеджер", "Заявка", "Взято о", "Реакція"]
+    col_w   = [max(len(h), max(len(r[i]) for r in table_rows))
+               for i, h in enumerate(headers)]
+
+    def fmt_row(cols):
+        return " | ".join(c.ljust(w) for c, w in zip(cols, col_w))
 
     summary_block = ""
     if summary_rows:
@@ -707,8 +714,7 @@ async def _handle_daily_stats(message):
 
     await send_long(
         message,
-        f"📅 <b>За сьогодні ({today_str})</b>\n"
-        f"Всього: {len(today_rows)} | Взято: {taken_today} | Не взято: {len(today_rows) - taken_today}\n\n"
+        f"{header_line}\n\n"
         f"<pre>{fmt_row(headers)}\n"
         f"{'-+-'.join('-' * w for w in col_w)}\n"
         f"{chr(10).join(fmt_row(r) for r in table_rows)}</pre>"
@@ -721,50 +727,41 @@ async def _handle_monthly_stats(message):
     month_start = now_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
     month_label = now_dt.strftime('%m.%Y')
 
+    # Взяті цього місяця — по taken_at, щоб збігатись з лімітами черги
     month_rows = q(
-        "SELECT * FROM leads WHERE created_at >= ? AND status != 'closed' ORDER BY created_at",
+        "SELECT * FROM leads WHERE taken_at >= ? AND status = 'taken' ORDER BY taken_at",
         (month_start,), fetch='all',
     )
     if not month_rows:
-        await message.reply_text(
-            f"📆 <b>За місяць ({month_label})</b>\n\nЗаявок ще не було.",
-            parse_mode='HTML',
-        )
-        return
-
-    mgr_taken     = defaultdict(int)
-    mgr_not       = defaultdict(int)
-    mgr_reactions = defaultdict(list)
-    for lead in month_rows:
-        mid = lead['manager_id'] or '—'
-        if lead['status'] == 'taken':
-            mgr_taken[mid] += 1
-            if lead['taken_at'] and lead['created_at']:
-                mgr_reactions[mid].append(max(0, int((lead['taken_at'] - lead['created_at']) / 60)))
-        else:
-            mgr_not[mid] += 1
-
-    m_rows        = []
-    total_taken   = 0
-    all_reactions = []
-    for mgr_name, tg_id in MANAGERS.items():
-        t = mgr_taken.get(tg_id, 0)
-        if t == 0:
-            continue
-        total_taken += t
-        reactions = mgr_reactions.get(tg_id, [])
-        all_reactions.extend(reactions)
-        avg_str = f"{int(sum(reactions)/len(reactions))} хв" if reactions else "—"
-        m_rows.append((mgr_name, str(t), avg_str))
-
-    if not m_rows:
         await message.reply_text(
             f"📆 <b>За місяць ({month_label})</b>\n\nЗаявок ще не взято.",
             parse_mode='HTML',
         )
         return
 
-    not_taken_total = sum(mgr_not.values())
+    mgr_taken     = defaultdict(int)
+    mgr_reactions = defaultdict(list)
+    all_reactions = []
+
+    for lead in month_rows:
+        mid = lead['manager_id'] or '—'
+        mgr_taken[mid] += 1
+        if lead['taken_at'] and lead['created_at']:
+            reaction = max(0, int((lead['taken_at'] - lead['created_at']) / 60))
+            mgr_reactions[mid].append(reaction)
+            all_reactions.append(reaction)
+
+    m_rows      = []
+    total_taken = 0
+    for mgr_name, tg_id in MANAGERS.items():
+        t = mgr_taken.get(tg_id, 0)
+        if t == 0:
+            continue
+        total_taken += t
+        reactions = mgr_reactions.get(tg_id, [])
+        avg_str = f"{int(sum(reactions)/len(reactions))} хв" if reactions else "—"
+        m_rows.append((mgr_name, str(t), avg_str))
+
     overall_avg = (
         f"{int(sum(all_reactions)/len(all_reactions))} хв" if all_reactions else "—"
     )
@@ -779,8 +776,7 @@ async def _handle_monthly_stats(message):
     await send_long(
         message,
         f"📆 <b>За місяць ({month_label})</b>\n"
-        f"Всього: {len(month_rows)} | Взято: {total_taken} | "
-        f"Не взято: {not_taken_total} | Сер. реакція: {overall_avg}\n\n"
+        f"Взято: {total_taken} | Сер. реакція: {overall_avg}\n\n"
         f"<pre>{fmt_m(m_headers)}\n"
         f"{'-+-'.join('-' * w for w in m_col_w)}\n"
         f"{chr(10).join(fmt_m(r) for r in m_rows)}</pre>",
@@ -898,10 +894,11 @@ async def sync_from_kommo() -> tuple[int, int]:
                         skipped += 1
                         continue
 
-                    # Використовуємо час синхронізації як created_at, щоб уникнути
-                    # негайної ескалації старих заявок
+                    # Беремо оригінальний created_at з Kommo для точної статистики.
+                    # Ескалація прив'язана до sent_at, тому стара дата не викличе
+                    # негайних ескалацій.
                     title   = _make_lead_title(AMO_HOT_STATUS_ID, lead_id)
-                    created = datetime.now().timestamp()
+                    created = lead.get("created_at") or datetime.now().timestamp()
                     try:
                         q("INSERT INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
                           (lead_id, "queued", created, title))
