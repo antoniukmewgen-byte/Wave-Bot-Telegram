@@ -803,17 +803,39 @@ async def _handle_monthly_stats(message):
 
 
 async def _handle_queue(message, managers: dict):
-    month    = day_key()
-    queue    = sorted_queue(managers=managers)
-    if not queue:
+    month     = day_key()
+    avail_map = get_all_availability()
+    overrides = get_all_max_leads_overrides()
+    taken_map = get_all_taken(month)
+    sent_map  = _build_sent_map()
+
+    # Всі активні менеджери відсортовані по кількості взятих
+    active = []
+    for tg_id, info in managers.items():
+        if not avail_map.get(tg_id, False):
+            continue
+        taken     = taken_map.get(tg_id, 0)
+        max_leads = overrides[tg_id] if tg_id in overrides else info['max_leads']
+        if max_leads is not None and taken >= max_leads:
+            continue
+        active.append((taken, tg_id))
+    active.sort()
+
+    if not active:
         await message.reply_text("😶 Черга порожня — немає вільних менеджерів")
         return
-    taken_map = get_all_taken(month)
+
     lines = ["📊 <b>Поточна черга:</b>\n"]
-    for i, tg_id in enumerate(queue, 1):
-        name  = managers.get(tg_id, {}).get('name', tg_id)
-        taken = taken_map.get(tg_id, 0)
-        lines.append(f"{i}. {name} — взяв: {taken}")
+    for i, (taken, tg_id) in enumerate(active, 1):
+        info      = managers.get(tg_id, {})
+        name      = info.get('name', tg_id)
+        max_leads = overrides[tg_id] if tg_id in overrides else info.get('max_leads')
+        limit_str = '∞' if max_leads is None else str(max_leads)
+        pending   = sent_map.get(tg_id, 0) > 0
+        mark      = " 📨" if pending else ""
+        lines.append(f"{i}. {name} — взяв: {taken}/{limit_str}{mark}")
+
+    lines.append("\n<i>📨 — очікує відповіді на поточну заявку</i>")
     await send_long(message, '\n'.join(lines))
 
 
