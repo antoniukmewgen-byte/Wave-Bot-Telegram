@@ -398,7 +398,7 @@ def _cleanup_old_records():
 async def _tick():
     now   = datetime.now().timestamp()
     leads = q(
-        "SELECT * FROM leads WHERE status NOT IN ('taken','duplicate','closed')",
+        "SELECT * FROM leads WHERE status NOT IN ('taken','duplicate','closed') ORDER BY created_at DESC",
         fetch='all',
     )
     if not leads:
@@ -627,7 +627,7 @@ async def _handle_connections(message):
 
 async def _handle_active_leads(message, managers: dict):
     rows = q(
-        "SELECT * FROM leads WHERE status NOT IN ('taken','duplicate','closed') ORDER BY created_at",
+        "SELECT * FROM leads WHERE status NOT IN ('taken','duplicate','closed') ORDER BY created_at DESC",
         fetch='all',
     )
     if not rows:
