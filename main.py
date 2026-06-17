@@ -1143,6 +1143,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
 
         elif action in ('skip', 's'):
+            # Якщо менеджер вийшов з черги — не дозволяємо відхиляти
+            if not is_available(manager_id):
+                await query.answer(
+                    "⛔ Ви поза чергою. Щоб взаємодіяти із заявками — спочатку увійдіть у чергу (/work)",
+                    show_alert=True,
+                )
+                return
+
             await query.answer()
             mark_skipped(lead_id, manager_id)
             await edit_msg(manager_id, lead_id, f"⏭ Ви відмовились від заявки\n\n{lead['title']}")
@@ -1154,6 +1162,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"Заявка {lead_id} відхилена {mgr_name}")
 
         elif action in ('dup', 'd'):
+            if not is_available(manager_id):
+                await query.answer(
+                    "⛔ Ви поза чергою. Щоб взаємодіяти із заявками — спочатку увійдіть у чергу (/work)",
+                    show_alert=True,
+                )
+                return
+
             await query.answer()
             q("UPDATE leads SET status='duplicate' WHERE lead_id=?", (lead_id,))
             await edit_msg(manager_id, lead_id, "🔁 Ви позначили заявку як дубль")
