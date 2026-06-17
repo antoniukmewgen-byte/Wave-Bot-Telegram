@@ -20,7 +20,7 @@ from db import (
     init_db, q, get_lead, get_taken, get_all_taken, get_all_availability, take_lead,
     get_msg_id, save_msg, get_all_msgs,
     mark_skipped, get_skipped,
-    is_available, set_availability,
+    is_available, set_availability, get_all_exit_reasons,
     mark_connected, get_connected,
     get_all_max_leads_overrides, set_max_leads_override, reset_all_limit_overrides,
 )
@@ -157,10 +157,10 @@ def sorted_queue(
 # ─── ВІДПРАВКА / РЕДАГУВАННЯ ─────────────────────────────────────────────────
 
 async def _deactivate_blocked(manager_id: str):
-    set_availability(manager_id, False)
+    set_availability(manager_id, False, reason='bot_blocked')
     name = MANAGERS_BY_ID.get(manager_id, manager_id)
     logger.warning(f"{name} ({manager_id}) заблокував бота — деактивовано")
-    await notify_admins(f"🚫 <b>{name}</b> заблокував бота — автоматично виведено з черги")
+    await notify_admins(f"🔕 <b>{name}</b> заблокував бота — автоматично виведено з черги")
 
 
 async def _tg_retry(coro_fn, manager_id: str):
@@ -544,9 +544,10 @@ async def on_work_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id not in managers:
             reason = get_block_reason(user_id) or "❌ Ви не можете увійти в чергу. Зверніться до керівника."
             await update.message.reply_text(reason, reply_markup=MANAGER_KB)
+            set_availability(user_id, False, reason='blocked')
             return
 
-    set_availability(user_id, active)
+    set_availability(user_id, active, reason=None if active else 'manual')
 
     status = "✅ Ви в черзі — заявки надходитимуть" if active else "🚫 Ви вийшли з черги — заявки не надходитимуть"
     await update.message.reply_text(status, reply_markup=MANAGER_KB)
@@ -562,6 +563,7 @@ async def _handle_manager_status(message, managers: dict):
     overrides     = get_all_max_leads_overrides()
     taken_map     = get_all_taken(month)
     sent_map      = _build_sent_map()
+    exit_reasons  = get_all_exit_reasons()
 
     lines = ["👥 <b>Статус менеджерів:</b>\n"]
     for name, tg_id in MANAGERS.items():
@@ -571,42 +573,31 @@ async def _handle_manager_status(message, managers: dict):
         if tg_id not in managers:
             continue
         if tg_id not in connected_ids:
-            lines.append(f"❌ {name} — ще не підключився")
+            lines.append(f"(КОРИСТУВАЧ ❌) {name} — ще не підключився")
             continue
         taken     = taken_map.get(tg_id, 0)
         info      = managers.get(tg_id, {})
         max_leads = overrides[tg_id] if tg_id in overrides else info.get('max_leads')
         lim_mark  = " ✏️" if tg_id in overrides else ""
+        limit_str = '∞' if max_leads is None else f"{max_leads}{lim_mark}"
         at_limit  = max_leads is not None and taken >= max_leads
         is_active = avail_map.get(tg_id, False)
         has_pending = sent_map.get(tg_id, 0) > 0
-        in_queue  = is_active and not at_limit
-        conv      = info.get('conversion', 0)
-        payments  = info.get('payments', '?')
-        hot_taken = info.get('hot_taken', '?')
 
         if at_limit:
-            lines.append(
-                f"⛔ {name} — ліміт вичерпано ({taken}/{max_leads}{lim_mark}) | "
-                f"конв. {conv}% | оплат: {payments} | лідів: {hot_taken}"
-            )
+            lines.append(f"(БОТ ⛔) {name} — ліміт вичерпано | взяв: {taken}/{limit_str}")
         elif not is_active:
-            lines.append(
-                f"🚫 {name} — поза чергою "
-                f"(конв. {conv}% | оплат: {payments} | лідів: {hot_taken})"
-            )
+            reason = exit_reasons.get(tg_id)
+            if reason == 'blocked':
+                lines.append(f"(БОТ 🔒) {name} — недостатні показники | взяв: {taken}/{limit_str}")
+            elif reason == 'bot_blocked':
+                lines.append(f"(БОТ 🔕) {name} — заблокував бота | взяв: {taken}/{limit_str}")
+            else:
+                lines.append(f"(КОРИСТУВАЧ 🚫) {name} — не в роботі | взяв: {taken}/{limit_str}")
         elif has_pending:
-            limit_str = '∞' if max_leads is None else f"{max_leads}{lim_mark}"
-            basis     = f"конв. {conv}%" if payments else f"лідів: {hot_taken}"
-            lines.append(
-                f"📨 {name} — очікує відповіді | взяв: {taken}/{limit_str} | {basis} | оплат: {payments}"
-            )
+            lines.append(f"(КОРИСТУВАЧ 📨) {name} — очікує відповіді | взяв: {taken}/{limit_str}")
         else:
-            limit_str = '∞' if max_leads is None else f"{max_leads}{lim_mark}"
-            basis     = f"конв. {conv}%" if payments else f"лідів: {hot_taken}"
-            lines.append(
-                f"✅ {name} — взяв: {taken}/{limit_str} | {basis} | оплат: {payments}"
-            )
+            lines.append(f"(КОРИСТУВАЧ ✅) {name} — в роботі | взяв: {taken}/{limit_str}")
     await send_long(message, '\n'.join(lines))
 
 
@@ -1072,7 +1063,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer()
                 return
             active = (lead_id == 'on')
-            set_availability(manager_id, active)
+            set_availability(manager_id, active, reason=None if active else 'manual')
             await query.answer()
             status = "✅ Ви в черзі — заявки надходитимуть" if active else "🚫 Ви вийшли з черги — заявки не надходитимуть"
             await query.edit_message_text(

@@ -94,6 +94,7 @@ def _migrate():
         "ALTER TABLE leads ADD COLUMN last_rebroadcast_at REAL",
         "ALTER TABLE leads ADD COLUMN taken_at REAL",
         "ALTER TABLE availability ADD COLUMN max_leads INTEGER",
+        "ALTER TABLE availability ADD COLUMN exit_reason TEXT",
     ]
     with sqlite3.connect(DB_PATH) as c:
         for sql in migrations:
@@ -226,10 +227,18 @@ def is_available(manager_id: str) -> bool:
     return bool(row['is_active']) if row else False
 
 
-def set_availability(manager_id: str, active: bool):
-    q("""INSERT INTO availability (manager_id, is_active) VALUES (?, ?)
-         ON CONFLICT(manager_id) DO UPDATE SET is_active=?""",
-      (manager_id, int(active), int(active)))
+def get_all_exit_reasons() -> dict:
+    """Повертає {manager_id: exit_reason} для менеджерів поза чергою."""
+    rows = q("SELECT manager_id, exit_reason FROM availability WHERE is_active=0 AND exit_reason IS NOT NULL",
+             fetch='all')
+    return {r['manager_id']: r['exit_reason'] for r in rows} if rows else {}
+
+
+def set_availability(manager_id: str, active: bool, reason: str = None):
+    exit_reason = None if active else (reason or 'manual')
+    q("""INSERT INTO availability (manager_id, is_active, exit_reason) VALUES (?, ?, ?)
+         ON CONFLICT(manager_id) DO UPDATE SET is_active=?, exit_reason=?""",
+      (manager_id, int(active), exit_reason, int(active), exit_reason))
 
 
 def mark_connected(manager_id: str, name: str):
