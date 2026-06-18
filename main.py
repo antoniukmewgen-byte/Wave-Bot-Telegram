@@ -1266,7 +1266,14 @@ async def amocrm_webhook(request: Request):
         return {'ok': True}
 
     if str(pipeline_id) != AMO_PIPELINE_ID:
-        logger.info(f"Webhook: ігноруємо pipeline_id={pipeline_id} (не наша воронка)")
+        # Якщо заявка є в нашій БД — закриваємо, бо вона пішла в іншу воронку
+        lead = get_lead(lead_id)
+        if lead and lead['status'] not in ('taken', 'duplicate', 'closed'):
+            q("UPDATE leads SET status='closed' WHERE lead_id=?", (lead_id,))
+            await remove_from_others(lead_id, note="📋 Заявку переміщено в іншу воронку CRM")
+            logger.info(f"Webhook: заявка {lead_id} пішла в іншу воронку → закрито в боті")
+        else:
+            logger.info(f"Webhook: ігноруємо pipeline_id={pipeline_id} (не наша воронка)")
         return {'ok': True}
 
     if str(status_id) != AMO_HOT_STATUS_ID:
