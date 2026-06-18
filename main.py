@@ -846,7 +846,7 @@ async def _handle_sync(message):
             f"✅ <b>Синхронізацію завершено</b>\n"
             f"➕ Додано нових: <b>{added}</b>\n"
             f"⏭ Вже були в системі: <b>{skipped}</b>\n"
-            f"🗑 Закрито (немає в CRM): <b>{closed}</b>",
+            f"🔄 Змінили статус в CRM: <b>{closed}</b>",
             parse_mode='HTML',
         )
     except Exception as e:
