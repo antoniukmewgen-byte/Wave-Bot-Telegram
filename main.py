@@ -841,11 +841,12 @@ async def _handle_sync(message):
         return
     msg = await message.reply_text("🔄 Синхронізація... зачекайте")
     try:
-        added, skipped = await sync_from_kommo()
+        added, skipped, closed = await sync_from_kommo()
         await msg.edit_text(
             f"✅ <b>Синхронізацію завершено</b>\n"
             f"➕ Додано нових: <b>{added}</b>\n"
-            f"⏭ Вже були в системі: <b>{skipped}</b>",
+            f"⏭ Вже були в системі: <b>{skipped}</b>\n"
+            f"🗑 Закрито (немає в CRM): <b>{closed}</b>",
             parse_mode='HTML',
         )
     except Exception as e:
@@ -891,15 +892,17 @@ def _make_lead_title(status_id: str, lead_id: str) -> str:
     return f'{header}\n🔗 <a href="{lead_url}">Угода #{lead_id}</a>'
 
 
-async def sync_from_kommo() -> tuple[int, int]:
+async def sync_from_kommo() -> tuple[int, int, int]:
     if not AMO_TOKEN:
-        return 0, 0
+        return 0, 0, 0
 
     url     = f"https://{AMO_SUBDOMAIN}.kommo.com/api/v4/leads"
     headers = {"Authorization": f"Bearer {AMO_TOKEN}"}
     added   = 0
     skipped = 0
+    closed  = 0
     page    = 1
+    kommo_ids: set[str] = set()
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -922,13 +925,11 @@ async def sync_from_kommo() -> tuple[int, int]:
 
                 for lead in leads:
                     lead_id = str(lead["id"])
+                    kommo_ids.add(lead_id)
                     if get_lead(lead_id):
                         skipped += 1
                         continue
 
-                    # Беремо оригінальний created_at з Kommo для точної статистики.
-                    # Ескалація прив'язана до sent_at, тому стара дата не викличе
-                    # негайних ескалацій.
                     title   = _make_lead_title(AMO_HOT_STATUS_ID, lead_id)
                     created = lead.get("created_at") or datetime.now().timestamp()
                     try:
@@ -942,7 +943,19 @@ async def sync_from_kommo() -> tuple[int, int]:
                     break
                 page += 1
 
-    return added, skipped
+    # Закриваємо активні заявки яких вже немає в Kommo
+    active_rows = q(
+        "SELECT lead_id FROM leads WHERE status NOT IN ('taken','duplicate','closed')",
+        fetch='all',
+    )
+    for row in (active_rows or []):
+        if row['lead_id'] not in kommo_ids:
+            q("UPDATE leads SET status='closed' WHERE lead_id=?", (row['lead_id'],))
+            await remove_from_others(row['lead_id'], note="📋 Заявку закрито в CRM")
+            closed += 1
+            logger.info(f"Sync: заявка {row['lead_id']} відсутня в Kommo → закрито")
+
+    return added, skipped, closed
 
 
 # ─── CONVERSATION: ЛІМІТИ МЕНЕДЖЕРІВ ────────────────────────────────────────
