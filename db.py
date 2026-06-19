@@ -85,6 +85,13 @@ def _create_tables():
                 name         TEXT,
                 connected_at REAL
             );
+            CREATE TABLE IF NOT EXISTS schedules (
+                manager_id     TEXT PRIMARY KEY,
+                days           TEXT NOT NULL DEFAULT '0,1,2,3,4',
+                start_time     TEXT NOT NULL DEFAULT '16:00',
+                enabled        INTEGER DEFAULT 1,
+                last_notified  TEXT
+            );
         """)
 
 
@@ -250,3 +257,59 @@ def mark_connected(manager_id: str, name: str):
 
 def get_connected() -> list:
     return [dict(r) for r in q("SELECT * FROM connected ORDER BY connected_at", fetch='all')]
+
+
+# ─── РОЗКЛАДИ ────────────────────────────────────────────────────────────────
+
+def get_schedule(manager_id: str) -> Optional[dict]:
+    row = q("SELECT * FROM schedules WHERE manager_id=?", (manager_id,), fetch='one')
+    return dict(row) if row else None
+
+
+def get_all_schedules() -> dict:
+    """Повертає {manager_id: {days, start_time, enabled, last_notified}}."""
+    rows = q("SELECT * FROM schedules", fetch='all')
+    return {r['manager_id']: dict(r) for r in rows} if rows else {}
+
+
+def set_schedule(manager_id: str, days: str, start_time: str):
+    """days — рядок '0,1,2,3,4' (пн=0, нд=6)."""
+    q("""INSERT INTO schedules (manager_id, days, start_time) VALUES (?, ?, ?)
+         ON CONFLICT(manager_id) DO UPDATE SET days=?, start_time=?""",
+      (manager_id, days, start_time, days, start_time))
+
+
+def set_schedule_enabled(manager_id: str, enabled: bool):
+    q("""INSERT INTO schedules (manager_id, enabled) VALUES (?, ?)
+         ON CONFLICT(manager_id) DO UPDATE SET enabled=?""",
+      (manager_id, int(enabled), int(enabled)))
+
+
+def update_last_notified(manager_id: str, date_str: str):
+    """date_str формат 'YYYY-MM-DD'."""
+    q("UPDATE schedules SET last_notified=? WHERE manager_id=?", (date_str, manager_id))
+
+
+def init_default_schedules(managers_map: dict):
+    """
+    Заповнює таблицю розкладів дефолтними значеннями якщо вони ще не задані.
+    managers_map: {name: tg_id}
+    """
+    DEFAULTS = {
+        '7083918297': ('0,1,2,3,6', '22:00'),   # Льоша: пн-чт + нд
+        '8762578305': ('0,1,2,4,5', '16:00'),   # Федя:  пн-ср + пт-сб
+    }
+    DEFAULT_DAYS = '0,1,2,3,4'
+    DEFAULT_TIME = '16:00'
+
+    existing = set(r['manager_id'] for r in (q("SELECT manager_id FROM schedules", fetch='all') or []))
+
+    with sqlite3.connect(DB_PATH) as c:
+        for name, tg_id in managers_map.items():
+            if tg_id in existing:
+                continue
+            days, start_time = DEFAULTS.get(tg_id, (DEFAULT_DAYS, DEFAULT_TIME))
+            c.execute(
+                "INSERT OR IGNORE INTO schedules (manager_id, days, start_time) VALUES (?,?,?)",
+                (tg_id, days, start_time),
+            )

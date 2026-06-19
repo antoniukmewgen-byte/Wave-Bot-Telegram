@@ -23,6 +23,7 @@ from db import (
     is_available, set_availability, get_all_exit_reasons,
     mark_connected, get_connected,
     get_all_max_leads_overrides, set_max_leads_override, reset_all_limit_overrides,
+    get_all_schedules, set_schedule, update_last_notified, init_default_schedules,
 )
 from sheets import fetch_managers, get_block_reason, warmup
 
@@ -380,9 +381,47 @@ async def rebroadcast_periodic(lead_id: str, title: str, **tick_ctx):
 
 # ─── ПЛАНУВАЛЬНИК ─────────────────────────────────────────────────────────────
 
+async def _check_schedules():
+    """Надсилає нагадування менеджерам на початку робочого дня."""
+    from datetime import timezone, timedelta
+    tz    = timezone(timedelta(hours=3))  # Europe/Kyiv (UTC+3)
+    now   = datetime.now(tz)
+    today = now.strftime('%Y-%m-%d')
+    weekday = now.weekday()  # 0=пн, 6=нд
+    current_time = now.strftime('%H:%M')
+
+    schedules = get_all_schedules()
+    for manager_id, sch in schedules.items():
+        if not sch.get('enabled', 1):
+            continue
+        if sch.get('last_notified') == today:
+            continue
+        days = [int(d) for d in sch['days'].split(',') if d.strip()]
+        if weekday not in days:
+            continue
+        if current_time != sch['start_time']:
+            continue
+        try:
+            name = MANAGERS_BY_ID.get(manager_id, manager_id)
+            await _app.bot.send_message(chat_id=manager_id, text="⏰")
+            await asyncio.sleep(2)
+            await _app.bot.send_message(chat_id=manager_id, text="⏰⏰")
+            await asyncio.sleep(2)
+            await _app.bot.send_message(
+                chat_id=manager_id,
+                text=f"⏰⏰⏰ <b>{name}</b>, твій робочий час почався!\nНе забудь увімкнути бота — натисни «✅ Увійти в чергу» якщо ще не зробив це.",
+                parse_mode='HTML',
+            )
+            update_last_notified(manager_id, today)
+            logger.info(f"Schedule: нагадування надіслано {name} ({manager_id})")
+        except Exception as e:
+            logger.warning(f"Schedule: не вдалось надіслати {manager_id}: {e}")
+
+
 async def scheduler_loop():
-    last_cleanup = datetime.now().month
-    last_day     = datetime.now().day
+    last_cleanup  = datetime.now().month
+    last_day      = datetime.now().day
+    last_sch_min  = ''
     while True:
         await asyncio.sleep(SCHEDULER_TICK)
         try:
@@ -394,6 +433,11 @@ async def scheduler_loop():
             if now.month != last_cleanup:
                 _cleanup_old_records()
                 last_cleanup = now.month
+            # Перевіряємо розклади раз на хвилину
+            cur_min = now.strftime('%H:%M')
+            if cur_min != last_sch_min:
+                last_sch_min = cur_min
+                await _check_schedules()
         except Exception as e:
             logger.error(f"Scheduler помилка: {e}")
             await notify_admin_error("scheduler (фоновий планувальник)", e)
@@ -488,6 +532,7 @@ ADMIN_KB = ReplyKeyboardMarkup(
         [KeyboardButton("📅 Статистика день"),  KeyboardButton("📆 Статистика місяць")],
         [KeyboardButton("📋 Активні заявки"),   KeyboardButton("⚙️ Ліміти")],
         [KeyboardButton("🔄 Синхронізація"),    KeyboardButton("🔌 Підключення")],
+        [KeyboardButton("⏰ Розклади")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -1073,6 +1118,116 @@ async def limits_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ─── CONVERSATION: РОЗКЛАДИ МЕНЕДЖЕРІВ ───────────────────────────────────────
+
+SCHED_SELECT, SCHED_DAYS, SCHED_TIME = range(3)
+
+DAYS_UA = {0: 'Пн', 1: 'Вт', 2: 'Ср', 3: 'Чт', 4: 'Пт', 5: 'Сб', 6: 'Нд'}
+
+
+def _format_schedule(sch: dict) -> str:
+    days = [DAYS_UA[int(d)] for d in sch['days'].split(',') if d.strip()]
+    status = '✅' if sch.get('enabled', 1) else '❌'
+    return f"{status} {', '.join(days)} о {sch['start_time']}"
+
+
+async def schedules_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in ADMIN_IDS:
+        return ConversationHandler.END
+
+    schedules = get_all_schedules()
+    buttons   = []
+    for name, tg_id in sorted(MANAGERS.items(), key=lambda x: x[0]):
+        sch = schedules.get(tg_id)
+        sch_text = _format_schedule(sch) if sch else '—'
+        buttons.append([InlineKeyboardButton(
+            f"{name} | {sch_text}", callback_data=f"sched:{tg_id}"
+        )])
+
+    await update.message.reply_text(
+        "⏰ <b>Розклади менеджерів</b>\nОберіть менеджера для редагування:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode='HTML',
+    )
+    return SCHED_SELECT
+
+
+async def schedules_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    tg_id = query.data.split(':', 1)[1]
+    context.user_data['sched_manager_id'] = tg_id
+
+    name = MANAGERS_BY_ID.get(tg_id, tg_id)
+    schedules = get_all_schedules()
+    sch = schedules.get(tg_id)
+    current = _format_schedule(sch) if sch else 'не задано'
+
+    await query.edit_message_text(
+        f"⏰ <b>{name}</b>\nПоточний розклад: {current}\n\n"
+        "Введіть робочі дні через кому:\n"
+        "<code>0</code>=Пн <code>1</code>=Вт <code>2</code>=Ср <code>3</code>=Чт "
+        "<code>4</code>=Пт <code>5</code>=Сб <code>6</code>=Нд\n\n"
+        "Приклад: <code>0,1,2,3,4</code> (пн-пт)",
+        parse_mode='HTML',
+    )
+    return SCHED_DAYS
+
+
+async def schedules_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in ADMIN_IDS:
+        return ConversationHandler.END
+
+    text = update.message.text.strip()
+    try:
+        days = [int(d.strip()) for d in text.split(',')]
+        assert all(0 <= d <= 6 for d in days) and days
+    except Exception:
+        await update.message.reply_text("❌ Невірний формат. Введіть цифри від 0 до 6 через кому.\nПриклад: <code>0,1,2,3,4</code>", parse_mode='HTML')
+        return SCHED_DAYS
+
+    context.user_data['sched_days'] = ','.join(str(d) for d in sorted(set(days)))
+    await update.message.reply_text(
+        "Введіть час початку роботи у форматі <code>ГГ:ХХ</code>\nПриклад: <code>16:00</code>",
+        parse_mode='HTML',
+    )
+    return SCHED_TIME
+
+
+async def schedules_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in ADMIN_IDS:
+        return ConversationHandler.END
+
+    text = update.message.text.strip()
+    try:
+        datetime.strptime(text, '%H:%M')
+    except ValueError:
+        await update.message.reply_text("❌ Невірний формат часу. Введіть у форматі <code>ГГ:ХХ</code>\nПриклад: <code>16:00</code>", parse_mode='HTML')
+        return SCHED_TIME
+
+    tg_id = context.user_data['sched_manager_id']
+    days  = context.user_data['sched_days']
+    set_schedule(tg_id, days, text)
+
+    name = MANAGERS_BY_ID.get(tg_id, tg_id)
+    days_str = ', '.join(DAYS_UA[int(d)] for d in days.split(','))
+    await update.message.reply_text(
+        f"✅ Розклад збережено!\n<b>{name}</b>: {days_str} о {text}",
+        reply_markup=ADMIN_KB,
+        parse_mode='HTML',
+    )
+    logger.info(f"Schedule: розклад {name} ({tg_id}) → {days} {text}")
+    return ConversationHandler.END
+
+
+async def schedules_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Скасовано", reply_markup=ADMIN_KB)
+    return ConversationHandler.END
+
+
 # ─── CALLBACK ────────────────────────────────────────────────────────────────
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1224,8 +1379,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def lifespan(fastapi: FastAPI):
     global _app
     init_db()
+    init_default_schedules(MANAGERS)
 
     _app = Application.builder().token(BOT_TOKEN).build()
+
     _lim_entry = MessageHandler(filters.TEXT & filters.Regex(r'^⚙️ Ліміти$'), limits_start)
     _app.add_handler(ConversationHandler(
         entry_points=[_lim_entry],
@@ -1237,6 +1394,20 @@ async def lifespan(fastapi: FastAPI):
         per_user=True,
         allow_reentry=True,
     ))
+
+    _sched_entry = MessageHandler(filters.TEXT & filters.Regex(r'^⏰ Розклади$'), schedules_start)
+    _app.add_handler(ConversationHandler(
+        entry_points=[_sched_entry],
+        states={
+            SCHED_SELECT: [CallbackQueryHandler(schedules_select, pattern=r'^sched:'), _sched_entry],
+            SCHED_DAYS:   [_sched_entry, MessageHandler(filters.TEXT & ~filters.COMMAND, schedules_days)],
+            SCHED_TIME:   [_sched_entry, MessageHandler(filters.TEXT & ~filters.COMMAND, schedules_time)],
+        },
+        fallbacks=[CommandHandler('cancel', schedules_cancel)],
+        per_user=True,
+        allow_reentry=True,
+    ))
+
     _app.add_handler(CallbackQueryHandler(on_callback))
     _app.add_handler(CommandHandler('start', on_start))
     _app.add_handler(CommandHandler('work', on_work))
@@ -1246,7 +1417,7 @@ async def lifespan(fastapi: FastAPI):
     ))
     _app.add_handler(MessageHandler(
         filters.TEXT & filters.Regex(
-            r'^(👥 Статус менеджерів|📊 Черга|🔌 Підключення|📋 Активні заявки|📅 Статистика день|📆 Статистика місяць|🔄 Синхронізація)$'
+            r'^(👥 Статус менеджерів|📊 Черга|🔌 Підключення|📋 Активні заявки|📅 Статистика день|📆 Статистика місяць|🔄 Синхронізація|⏰ Розклади)$'
         ),
         on_admin_button,
     ))
