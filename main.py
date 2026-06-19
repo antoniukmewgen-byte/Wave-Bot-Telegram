@@ -14,7 +14,7 @@ from config import (
     BOT_TOKEN, AMO_SUBDOMAIN, AMO_TOKEN, AMO_PIPELINE_ID, AMO_HOT_STATUS_ID,
     HOT_STATUSES, ADMIN_IDS,
     TIMEOUT_PERSONAL, TIMEOUT_WARN, TIMEOUT_SOS, TIMEOUT_REBROADCAST,
-    SCHEDULER_TICK, MANAGERS, WEBHOOK_PATH,
+    SCHEDULER_TICK, MANAGERS, WEBHOOK_PATH, KOMMO_MANAGER_IDS,
 )
 from db import (
     init_db, q, get_lead, get_taken, get_all_taken, get_all_availability, take_lead,
@@ -65,6 +65,28 @@ async def notify_admins(text: str):
             await _app.bot.send_message(chat_id=admin_id, text=text, parse_mode='HTML')
         except Exception:
             pass
+
+
+async def _set_kommo_responsible(lead_id: str, manager_id: str) -> bool:
+    """Встановлює відповідального менеджера в Kommo після взяття заявки. Повертає True якщо успішно."""
+    kommo_user_id = KOMMO_MANAGER_IDS.get(manager_id)
+    if not kommo_user_id or not AMO_TOKEN:
+        return False
+    url = f"https://{AMO_SUBDOMAIN}.kommo.com/api/v4/leads"
+    payload = [{"id": int(lead_id), "responsible_user_id": kommo_user_id}]
+    headers = {"Authorization": f"Bearer {AMO_TOKEN}", "Content-Type": "application/json"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.patch(url, json=payload, headers=headers) as resp:
+                if resp.status not in (200, 202, 204):
+                    body = await resp.text()
+                    logger.error(f"Kommo responsible: HTTP {resp.status} для заявки {lead_id} | {body[:200]}")
+                    return False
+                logger.info(f"Kommo responsible: заявка {lead_id} → менеджер {kommo_user_id}")
+                return True
+    except Exception as e:
+        logger.error(f"Kommo responsible: помилка для заявки {lead_id} | {e}")
+        return False
 
 
 async def notify_admin_error(where: str, error: Exception, manager_id: str = None):
@@ -1131,6 +1153,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await query.answer()
             await edit_msg(manager_id, lead_id, f"✅ Ви взяли заявку в роботу!\n\n{lead['title']}")
+
+            kommo_ok = await _set_kommo_responsible(lead_id, manager_id)
+            if kommo_ok:
+                await edit_msg(manager_id, lead_id, f"✅ Ви взяли заявку в роботу! | Відповідальний: {mgr_name}\n\n{lead['title']}")
             await remove_from_others(lead_id, except_id=manager_id,
                                      note=f"✅ Заявку взяв(ла) <b>{mgr_name}</b>")
             logger.info(f"Заявка {lead_id} взята {mgr_name} ({manager_id})")
