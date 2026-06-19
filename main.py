@@ -1145,6 +1145,7 @@ async def schedules_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{name} | {sch_text}", callback_data=f"sched:{tg_id}"
         )])
 
+    buttons.append([InlineKeyboardButton("❌ Скасувати", callback_data="sched:cancel")])
     await update.message.reply_text(
         "⏰ <b>Розклади менеджерів</b>\nОберіть менеджера для редагування:",
         reply_markup=InlineKeyboardMarkup(buttons),
@@ -1157,6 +1158,11 @@ async def schedules_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     tg_id = query.data.split(':', 1)[1]
+
+    if tg_id == 'cancel':
+        await query.edit_message_text("❌ Скасовано")
+        return ConversationHandler.END
+
     context.user_data['sched_manager_id'] = tg_id
 
     name = MANAGERS_BY_ID.get(tg_id, tg_id)
@@ -1164,6 +1170,7 @@ async def schedules_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sch = schedules.get(tg_id)
     current = _format_schedule(sch) if sch else 'не задано'
 
+    cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Скасувати", callback_data="sched:cancel")]])
     await query.edit_message_text(
         f"⏰ <b>{name}</b>\nПоточний розклад: {current}\n\n"
         "Введіть робочі дні через кому:\n"
@@ -1171,6 +1178,7 @@ async def schedules_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<code>4</code>=Пт <code>5</code>=Сб <code>6</code>=Нд\n\n"
         "Приклад: <code>0,1,2,3,4</code> (пн-пт)",
         parse_mode='HTML',
+        reply_markup=cancel_kb,
     )
     return SCHED_DAYS
 
@@ -1189,9 +1197,11 @@ async def schedules_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return SCHED_DAYS
 
     context.user_data['sched_days'] = ','.join(str(d) for d in sorted(set(days)))
+    cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Скасувати", callback_data="sched:cancel")]])
     await update.message.reply_text(
         "Введіть час початку роботи у форматі <code>ГГ:ХХ</code>\nПриклад: <code>16:00</code>",
         parse_mode='HTML',
+        reply_markup=cancel_kb,
     )
     return SCHED_TIME
 
@@ -1396,12 +1406,13 @@ async def lifespan(fastapi: FastAPI):
     ))
 
     _sched_entry = MessageHandler(filters.TEXT & filters.Regex(r'^⏰ Розклади$'), schedules_start)
+    _sched_cancel_cb = CallbackQueryHandler(schedules_select, pattern=r'^sched:cancel$')
     _app.add_handler(ConversationHandler(
         entry_points=[_sched_entry],
         states={
             SCHED_SELECT: [CallbackQueryHandler(schedules_select, pattern=r'^sched:'), _sched_entry],
-            SCHED_DAYS:   [_sched_entry, MessageHandler(filters.TEXT & ~filters.COMMAND, schedules_days)],
-            SCHED_TIME:   [_sched_entry, MessageHandler(filters.TEXT & ~filters.COMMAND, schedules_time)],
+            SCHED_DAYS:   [_sched_cancel_cb, _sched_entry, MessageHandler(filters.TEXT & ~filters.COMMAND, schedules_days)],
+            SCHED_TIME:   [_sched_cancel_cb, _sched_entry, MessageHandler(filters.TEXT & ~filters.COMMAND, schedules_time)],
         },
         fallbacks=[CommandHandler('cancel', schedules_cancel)],
         per_user=True,
