@@ -514,11 +514,18 @@ async def _tick():
 
         if lvl == 0 and age >= TIMEOUT_PERSONAL:
             # Розсилаємо тільки якщо немає іншої активної broadcast заявки
-            has_active_broadcast = q(
-                "SELECT 1 FROM leads WHERE status='broadcast' AND lead_id != ? LIMIT 1",
+            active_broadcast = q(
+                "SELECT lead_id FROM leads WHERE status='broadcast' AND lead_id != ? LIMIT 1",
                 (lid,), fetch='one',
             )
-            if not has_active_broadcast:
+            if not active_broadcast:
+                waiting = q(
+                    "SELECT COUNT(*) as cnt FROM leads WHERE status NOT IN ('taken','duplicate','closed','broadcast') AND esc_level=0 AND sent_at IS NOT NULL AND lead_id != ?",
+                    (lid,), fetch='one',
+                )
+                waiting_count = waiting['cnt'] if waiting else 0
+                if waiting_count > 0:
+                    logger.info(f"Broadcast: заявка {lid} іде всім | в черзі чекають: {waiting_count}")
                 await broadcast_to_all(lid, **tick_ctx)
         elif lvl == 1 and age >= TIMEOUT_WARN:
             await escalate_warn(lid, lead['title'], **tick_ctx)
