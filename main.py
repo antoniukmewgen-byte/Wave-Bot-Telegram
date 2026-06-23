@@ -513,7 +513,13 @@ async def _tick():
         age = now - sent_at
 
         if lvl == 0 and age >= TIMEOUT_PERSONAL:
-            await broadcast_to_all(lid, **tick_ctx)
+            # Розсилаємо тільки якщо немає іншої активної broadcast заявки
+            has_active_broadcast = q(
+                "SELECT 1 FROM leads WHERE status='broadcast' AND lead_id != ? LIMIT 1",
+                (lid,), fetch='one',
+            )
+            if not has_active_broadcast:
+                await broadcast_to_all(lid, **tick_ctx)
         elif lvl == 1 and age >= TIMEOUT_WARN:
             await escalate_warn(lid, lead['title'], **tick_ctx)
         elif lvl == 2 and age >= TIMEOUT_SOS:
