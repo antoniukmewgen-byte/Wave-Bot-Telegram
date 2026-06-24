@@ -326,8 +326,9 @@ async def broadcast_to_all(lead_id: str, **tick_ctx):
 
     if active_broadcast:
         # Статус міняємо але не надсилаємо — чекаємо своєї черги
-        q("UPDATE leads SET status='broadcast', esc_level=1, sent_at=? WHERE lead_id=?",
-          (datetime.now().timestamp(), lead_id))
+        # sent_at=NULL щоб ескалація не починалась поки не надіслана реально
+        q("UPDATE leads SET status='broadcast', esc_level=1, sent_at=NULL WHERE lead_id=?",
+          (lead_id,))
         logger.info(f"Заявка {lead_id}: перейшла в broadcast, чекає черги (активна: {active_broadcast['lead_id']})")
         return
 
