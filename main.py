@@ -308,6 +308,7 @@ async def broadcast_to_all(lead_id: str, **tick_ctx):
     Розіслати заявку всім вільним менеджерам.
     Оригінальний менеджер отримує оновлення через edit_msg і явно виключається
     з queue, щоб не отримати повідомлення двічі.
+    Статус завжди переходить в broadcast, але надсилання блокується якщо вже є активна broadcast заявка.
     """
     lead = get_lead(lead_id)
     if not lead or lead['status'] in ('taken', 'duplicate', 'closed'):
@@ -315,11 +316,24 @@ async def broadcast_to_all(lead_id: str, **tick_ctx):
 
     orig_manager = lead['manager_id']
     skipped      = get_skipped(lead_id)
+    text         = f"{lead['title']}\n👤 <i>Відкрита черга</i>"
 
-    # Виключаємо orig_manager з черги — він вже отримає edit_msg нижче
+    # Перевіряємо чи є вже активна broadcast заявка
+    active_broadcast = q(
+        "SELECT lead_id FROM leads WHERE status='broadcast' AND lead_id != ? LIMIT 1",
+        (lead_id,), fetch='one',
+    )
+
+    if active_broadcast:
+        # Статус міняємо але не надсилаємо — чекаємо своєї черги
+        q("UPDATE leads SET status='broadcast', esc_level=1, sent_at=? WHERE lead_id=?",
+          (datetime.now().timestamp(), lead_id))
+        logger.info(f"Заявка {lead_id}: перейшла в broadcast, чекає черги (активна: {active_broadcast['lead_id']})")
+        return
+
+    # Надсилаємо всім
     exclude = list(set(skipped + ([orig_manager] if orig_manager else [])))
     queue   = sorted_queue(exclude=exclude, **tick_ctx)
-    text    = f"{lead['title']}\n👤 <i>Відкрита черга</i>"
 
     if orig_manager:
         await edit_msg(orig_manager, lead_id, text, keep_buttons=True)
@@ -461,6 +475,41 @@ def _cleanup_old_records():
     logger.info(f"БД: очищено записи до {keep_from}")
 
 
+async def _send_next_queued_broadcast(**tick_ctx):
+    """Надсилає наступну broadcast заявку що чекає своєї черги (якщо немає активної з повідомленнями)."""
+    # Активна broadcast — та що вже має повідомлення у менеджерів
+    active = q(
+        "SELECT 1 FROM leads WHERE status='broadcast' AND lead_id IN (SELECT DISTINCT lead_id FROM messages) LIMIT 1",
+        fetch='one',
+    )
+    if active:
+        return
+
+    # Найновіша broadcast що ще не надіслана (немає повідомлень у менеджерів)
+    waiting = q(
+        "SELECT * FROM leads WHERE status='broadcast' AND lead_id NOT IN (SELECT DISTINCT lead_id FROM messages) ORDER BY created_at DESC LIMIT 1",
+        fetch='one',
+    )
+    if not waiting:
+        return
+
+    orig_manager = waiting['manager_id']
+    skipped      = get_skipped(waiting['lead_id'])
+    text         = f"{waiting['title']}\n👤 <i>Відкрита черга</i>"
+    exclude      = list(set(skipped + ([orig_manager] if orig_manager else [])))
+    queue        = sorted_queue(exclude=exclude, **tick_ctx)
+
+    if orig_manager:
+        await edit_msg(orig_manager, waiting['lead_id'], text, keep_buttons=True)
+
+    for mid in queue:
+        await delete_and_send(mid, waiting['lead_id'], text)
+
+    q("UPDATE leads SET sent_at=? WHERE lead_id=?",
+      (datetime.now().timestamp(), waiting['lead_id']))
+    logger.info(f"Заявка {waiting['lead_id']} надіслана всім з черги broadcast ({len(queue)} менеджерів)")
+
+
 async def _tick():
     now   = datetime.now().timestamp()
     leads = q(
@@ -513,20 +562,7 @@ async def _tick():
         age = now - sent_at
 
         if lvl == 0 and age >= TIMEOUT_PERSONAL:
-            # Розсилаємо тільки якщо немає іншої активної broadcast заявки
-            active_broadcast = q(
-                "SELECT lead_id FROM leads WHERE status='broadcast' AND lead_id != ? LIMIT 1",
-                (lid,), fetch='one',
-            )
-            if not active_broadcast:
-                waiting = q(
-                    "SELECT COUNT(*) as cnt FROM leads WHERE status NOT IN ('taken','duplicate','closed','broadcast') AND esc_level=0 AND sent_at IS NOT NULL AND lead_id != ?",
-                    (lid,), fetch='one',
-                )
-                waiting_count = waiting['cnt'] if waiting else 0
-                if waiting_count > 0:
-                    logger.info(f"Broadcast: заявка {lid} іде всім | в черзі чекають: {waiting_count}")
-                await broadcast_to_all(lid, **tick_ctx)
+            await broadcast_to_all(lid, **tick_ctx)
         elif lvl == 1 and age >= TIMEOUT_WARN:
             await escalate_warn(lid, lead['title'], **tick_ctx)
         elif lvl == 2 and age >= TIMEOUT_SOS:
@@ -535,6 +571,9 @@ async def _tick():
             rb_base = last_rb or sent_at or lead['created_at']
             if now - rb_base >= TIMEOUT_REBROADCAST:
                 await rebroadcast_periodic(lid, lead['title'], **tick_ctx)
+
+    # Надсилаємо наступну broadcast заявку що чекає черги
+    await _send_next_queued_broadcast(**tick_ctx)
 
 
 # ─── ADMIN UI ─────────────────────────────────────────────────────────────────
