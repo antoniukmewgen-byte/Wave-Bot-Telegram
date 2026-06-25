@@ -318,9 +318,9 @@ async def broadcast_to_all(lead_id: str, **tick_ctx):
     skipped      = get_skipped(lead_id)
     text         = f"{lead['title']}\n👤 <i>Відкрита черга</i>"
 
-    # Перевіряємо чи є вже активна broadcast заявка
+    # Перевіряємо чи є вже активна broadcast заявка (реально надіслана — має sent_at)
     active_broadcast = q(
-        "SELECT lead_id FROM leads WHERE status='broadcast' AND lead_id != ? LIMIT 1",
+        "SELECT lead_id FROM leads WHERE status='broadcast' AND sent_at IS NOT NULL AND lead_id != ? LIMIT 1",
         (lead_id,), fetch='one',
     )
 
@@ -478,17 +478,17 @@ def _cleanup_old_records():
 
 async def _send_next_queued_broadcast(**tick_ctx):
     """Надсилає наступну broadcast заявку що чекає своєї черги (якщо немає активної з повідомленнями)."""
-    # Активна broadcast — та що вже має повідомлення у менеджерів
+    # Активна broadcast — та що вже реально надіслана всім (є sent_at)
     active = q(
-        "SELECT 1 FROM leads WHERE status='broadcast' AND lead_id IN (SELECT DISTINCT lead_id FROM messages) LIMIT 1",
+        "SELECT 1 FROM leads WHERE status='broadcast' AND sent_at IS NOT NULL LIMIT 1",
         fetch='one',
     )
     if active:
         return
 
-    # Найновіша broadcast що ще не надіслана (немає повідомлень у менеджерів)
+    # Найновіша broadcast що ще не надіслана (sent_at=NULL)
     waiting = q(
-        "SELECT * FROM leads WHERE status='broadcast' AND lead_id NOT IN (SELECT DISTINCT lead_id FROM messages) ORDER BY created_at DESC LIMIT 1",
+        "SELECT * FROM leads WHERE status='broadcast' AND sent_at IS NULL ORDER BY created_at DESC LIMIT 1",
         fetch='one',
     )
     if not waiting:
@@ -983,11 +983,11 @@ async def _handle_diagnostics(message):
     # ── 2. Broadcast-заблоковані заявки ───────────────────────────────────────
     lines.append("\n\n📢 <b>Broadcast черга:</b>")
     bc_active = q(
-        "SELECT lead_id FROM leads WHERE status='broadcast' AND lead_id IN (SELECT DISTINCT lead_id FROM messages)",
+        "SELECT lead_id FROM leads WHERE status='broadcast' AND sent_at IS NOT NULL",
         fetch='all',
     ) or []
     bc_waiting = q(
-        "SELECT lead_id, created_at FROM leads WHERE status='broadcast' AND lead_id NOT IN (SELECT DISTINCT lead_id FROM messages) ORDER BY created_at DESC",
+        "SELECT lead_id FROM leads WHERE status='broadcast' AND sent_at IS NULL ORDER BY created_at DESC",
         fetch='all',
     ) or []
     if bc_active:
