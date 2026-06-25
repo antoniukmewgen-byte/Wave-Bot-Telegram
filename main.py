@@ -585,7 +585,7 @@ ADMIN_KB = ReplyKeyboardMarkup(
         [KeyboardButton("📅 Статистика день"),  KeyboardButton("📆 Статистика місяць")],
         [KeyboardButton("📋 Активні заявки"),   KeyboardButton("⚙️ Ліміти")],
         [KeyboardButton("🔄 Синхронізація"),    KeyboardButton("🔌 Підключення")],
-        [KeyboardButton("⏰ Розклади")],
+        [KeyboardButton("⏰ Розклади"),          KeyboardButton("🔍 Діагностика")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -950,6 +950,119 @@ async def _handle_queue(message, managers: dict):
     await send_long(message, '\n'.join(lines))
 
 
+async def _handle_diagnostics(message):
+    now = datetime.now().timestamp()
+    lines = ["🔍 <b>Повна діагностика бота</b>\n"]
+
+    # ── 1. Заявки в БД ────────────────────────────────────────────────────────
+    all_leads = q(
+        "SELECT * FROM leads WHERE status NOT IN ('taken','duplicate','closed') ORDER BY created_at DESC",
+        fetch='all',
+    ) or []
+    msg_counts = {}
+    for row in (q("SELECT lead_id, COUNT(*) as cnt FROM messages GROUP BY lead_id", fetch='all') or []):
+        msg_counts[row['lead_id']] = row['cnt']
+
+    lines.append(f"📋 <b>Активні заявки ({len(all_leads)}):</b>")
+    if not all_leads:
+        lines.append("  — немає")
+    for lead in all_leads:
+        age_s   = int(now - lead['created_at'])
+        age_str = f"{age_s//60}хв {age_s%60}с"
+        sent_str = f"{int(now - lead['sent_at'])}с тому" if lead['sent_at'] else "❌ не відправлена"
+        msgs_cnt = msg_counts.get(lead['lead_id'], 0)
+        rb_str = ''
+        if lead['last_rebroadcast_at']:
+            rb_str = f" | перероз: {int(now - lead['last_rebroadcast_at'])}с тому"
+        lines.append(
+            f"\n  <b>#{lead['lead_id']}</b> | {lead['status']} | esc={lead['esc_level']}\n"
+            f"  вік: {age_str} | sent: {sent_str}\n"
+            f"  повідомлень у менеджерів: {msgs_cnt}{rb_str}"
+        )
+
+    # ── 2. Broadcast-заблоковані заявки ───────────────────────────────────────
+    lines.append("\n\n📢 <b>Broadcast черга:</b>")
+    bc_active = q(
+        "SELECT lead_id FROM leads WHERE status='broadcast' AND lead_id IN (SELECT DISTINCT lead_id FROM messages)",
+        fetch='all',
+    ) or []
+    bc_waiting = q(
+        "SELECT lead_id, created_at FROM leads WHERE status='broadcast' AND lead_id NOT IN (SELECT DISTINCT lead_id FROM messages) ORDER BY created_at DESC",
+        fetch='all',
+    ) or []
+    if bc_active:
+        lines.append(f"  Активна (надіслана): {', '.join(r['lead_id'] for r in bc_active)}")
+    else:
+        lines.append("  Активна: немає")
+    if bc_waiting:
+        lines.append(f"  Чекають в черзі: {', '.join(r['lead_id'] for r in bc_waiting)}")
+    else:
+        lines.append("  Черга: порожня")
+
+    # ── 3. Менеджери ──────────────────────────────────────────────────────────
+    lines.append("\n\n👥 <b>Менеджери:</b>")
+    avail_map  = get_all_availability()
+    overrides  = get_all_max_leads_overrides()
+    taken_map  = get_all_taken(day_key())
+    sent_map   = _build_sent_map()
+    exit_reasons = get_all_exit_reasons()
+
+    try:
+        managers = fetch_managers()
+        sheets_ok = True
+    except Exception as e:
+        managers  = {}
+        sheets_ok = False
+        lines.append(f"  ⚠️ Google Sheets недоступний: {e}")
+
+    for name, tg_id in MANAGERS.items():
+        active   = avail_map.get(tg_id, False)
+        in_sheet = tg_id in managers
+        taken    = taken_map.get(tg_id, 0)
+        pending  = sent_map.get(tg_id, 0)
+        max_l    = overrides.get(tg_id) or (managers.get(tg_id, {}).get('max_leads') if in_sheet else '?')
+        limit_str = '∞' if max_l is None else str(max_l)
+        reason   = exit_reasons.get(tg_id, '')
+
+        if not in_sheet:
+            sheet_mark = "❌ нема в таблиці"
+        else:
+            sheet_mark = f"✅ таблиця | ліміт={limit_str} | взяв={taken}"
+
+        status_icon = "🟢" if active else "🔴"
+        pending_str = f" | 📨 чекає" if pending else ""
+        reason_str  = f" ({reason})" if reason and not active else ""
+
+        lines.append(f"  {status_icon} {name}{pending_str}{reason_str}\n     {sheet_mark}")
+
+    # ── 4. Google Sheets кеш ──────────────────────────────────────────────────
+    from sheets import _cache_ts, _cache
+    lines.append("\n\n📊 <b>Google Sheets:</b>")
+    if sheets_ok:
+        cache_age = int(now - _cache_ts) if _cache_ts else -1
+        lines.append(f"  Менеджерів у кеші: {len(_cache)}")
+        lines.append(f"  Кеш оновлено: {cache_age}с тому")
+        if not _cache:
+            lines.append("  ⚠️ КЕШ ПОРОЖНІЙ — жоден менеджер не пройде в чергу!")
+    else:
+        lines.append("  ❌ Не вдалось підключитись до таблиці")
+
+    # ── 5. Загальна статистика БД ─────────────────────────────────────────────
+    lines.append("\n\n🗄 <b>БД статистика:</b>")
+    total_leads = q("SELECT COUNT(*) as cnt FROM leads", fetch='one')['cnt']
+    taken_total = q("SELECT COUNT(*) as cnt FROM leads WHERE status='taken'", fetch='one')['cnt']
+    dup_total   = q("SELECT COUNT(*) as cnt FROM leads WHERE status='duplicate'", fetch='one')['cnt']
+    msg_total   = q("SELECT COUNT(*) as cnt FROM messages", fetch='one')['cnt']
+    lines.append(f"  Всього заявок: {total_leads} (взято: {taken_total}, дублів: {dup_total})")
+    lines.append(f"  Повідомлень у messages: {msg_total}")
+
+    # ── 6. Webhook URL ────────────────────────────────────────────────────────
+    lines.append(f"\n\n🔗 <b>Webhook path:</b> <code>/webhook/{WEBHOOK_PATH}</code>")
+    lines.append(f"AMO pipeline: <code>{AMO_PIPELINE_ID}</code> | status: <code>{AMO_HOT_STATUS_ID}</code>")
+
+    await send_long(message, '\n'.join(lines))
+
+
 async def _handle_sync(message):
     if not AMO_TOKEN:
         await message.reply_text(
@@ -996,6 +1109,8 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _handle_queue(update.message, managers)
     elif text == "🔄 Синхронізація":
         await _handle_sync(update.message)
+    elif text == "🔍 Діагностика":
+        await _handle_diagnostics(update.message)
 
 
 # ─── СИНХРОНІЗАЦІЯ З KOMMO ───────────────────────────────────────────────────
@@ -1481,7 +1596,7 @@ async def lifespan(fastapi: FastAPI):
     ))
     _app.add_handler(MessageHandler(
         filters.TEXT & filters.Regex(
-            r'^(👥 Статус менеджерів|📊 Черга|🔌 Підключення|📋 Активні заявки|📅 Статистика день|📆 Статистика місяць|🔄 Синхронізація|⏰ Розклади)$'
+            r'^(👥 Статус менеджерів|📊 Черга|🔌 Підключення|📋 Активні заявки|📅 Статистика день|📆 Статистика місяць|🔄 Синхронізація|⏰ Розклади|🔍 Діагностика)$'
         ),
         on_admin_button,
     ))
