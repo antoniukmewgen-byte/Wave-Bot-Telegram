@@ -9,7 +9,7 @@ from config import (
 )
 from db import (
     q, get_lead, get_all_taken, get_all_availability, get_all_max_leads_overrides,
-    get_skipped, get_all_schedules, update_last_notified, reset_all_limit_overrides,
+    get_skipped, get_all_schedules, update_last_notified, reset_all_limit_overrides, get_msg_id,
 )
 from notifications import (
     notify_admins, notify_admin_error, send_to, edit_msg, delete_and_send, remove_from_others,
@@ -154,6 +154,13 @@ async def broadcast_to_all(lead_id: str, **tick_ctx):
     if active_broadcast:
         # sent_at=NULL щоб ескалація не починалась поки не надіслана реально
         q("UPDATE leads SET status='broadcast', esc_level=1, sent_at=NULL WHERE lead_id=?", (lead_id,))
+        if orig_manager:
+            msg_id = get_msg_id(lead_id, orig_manager)
+            if msg_id:
+                try:
+                    await state._app.bot.delete_message(chat_id=orig_manager, message_id=msg_id)
+                except Exception as e:
+                    logger.debug(f"broadcast queue: не вдалось видалити повідомлення у {orig_manager}: {e}")
         logger.info(f"Заявка {lead_id}: перейшла в broadcast, чекає черги (активна: {active_broadcast['lead_id']})")
         return
 
@@ -161,7 +168,7 @@ async def broadcast_to_all(lead_id: str, **tick_ctx):
     queue   = sorted_queue(exclude=exclude, **tick_ctx)
 
     if orig_manager:
-        await edit_msg(orig_manager, lead_id, text, kb)
+        await delete_and_send(orig_manager, lead_id, text, kb)
 
     for mid in queue:
         await delete_and_send(mid, lead_id, text, kb)
@@ -245,7 +252,7 @@ async def _send_next_queued_broadcast(**tick_ctx):
     queue        = sorted_queue(exclude=exclude, **tick_ctx)
 
     if orig_manager:
-        await edit_msg(orig_manager, waiting['lead_id'], text, kb)
+        await delete_and_send(orig_manager, waiting['lead_id'], text, kb)
 
     for mid in queue:
         await delete_and_send(mid, waiting['lead_id'], text, kb)
