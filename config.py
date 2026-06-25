@@ -74,8 +74,8 @@ LEADS_MAX5_MAX   = 20    # 11 – 20        → max 5
 LEADS_MAX2_MAX   = 30    # 21 – 30        → max 2
                          # > 30           → поза чергою
 
-MAX_LEADS_5      = 5
-MAX_LEADS_2      = 2
+MAX_LEADS_5      = 10
+MAX_LEADS_2      = 5
 
 # backward-compat aliases
 CONV_LIMITED_MIN = CONV_MAX5_MIN
