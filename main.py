@@ -14,7 +14,7 @@ import state
 from config import BOT_TOKEN, MANAGERS, WEBHOOK_PATH, AMO_PIPELINE_ID, AMO_HOT_STATUS_ID
 from db import init_db, q, get_lead, init_default_schedules
 from kommo import make_lead_title
-from notifications import notify_admin_error, remove_from_others
+from notifications import notify_admin_error, remove_from_others, schedule_cleanup
 from queue_logic import assign_next, scheduler_loop
 from sheets import warmup
 
@@ -22,8 +22,8 @@ from handlers.manager import on_start, on_work, on_work_button, on_callback
 from handlers.admin import on_admin_button
 from handlers.conversations import (
     LIMIT_SELECT, LIMIT_INPUT, limits_start, limits_select, limits_input, limits_cancel,
-    SCHED_SELECT, SCHED_DAYS, SCHED_TIME,
-    schedules_start, schedules_select, schedules_days, schedules_time, schedules_cancel,
+    SCHED_SELECT, SCHED_DAYS, SCHED_TIME, SCHED_END_TIME,
+    schedules_start, schedules_select, schedules_days, schedules_time, schedules_end_time, schedules_cancel,
 )
 
 logging.basicConfig(
@@ -58,9 +58,10 @@ async def lifespan(fastapi: FastAPI):
     app.add_handler(ConversationHandler(
         entry_points=[_sched_entry],
         states={
-            SCHED_SELECT: [CallbackQueryHandler(schedules_select, pattern=r'^sched:'), _sched_entry],
-            SCHED_DAYS:   [_sched_cancel_cb, _sched_entry, MessageHandler(filters.TEXT & ~filters.COMMAND, schedules_days)],
-            SCHED_TIME:   [_sched_cancel_cb, _sched_entry, MessageHandler(filters.TEXT & ~filters.COMMAND, schedules_time)],
+            SCHED_SELECT:   [CallbackQueryHandler(schedules_select, pattern=r'^sched:'), _sched_entry],
+            SCHED_DAYS:     [_sched_cancel_cb, _sched_entry, MessageHandler(filters.TEXT & ~filters.COMMAND, schedules_days)],
+            SCHED_TIME:     [_sched_cancel_cb, _sched_entry, MessageHandler(filters.TEXT & ~filters.COMMAND, schedules_time)],
+            SCHED_END_TIME: [_sched_cancel_cb, _sched_entry, MessageHandler(filters.TEXT & ~filters.COMMAND, schedules_end_time)],
         },
         fallbacks=[CommandHandler('cancel', schedules_cancel)],
         per_user=True,
@@ -132,6 +133,7 @@ async def amocrm_webhook(request: Request):
         if lead and lead['status'] not in ('taken', 'duplicate', 'closed'):
             q("UPDATE leads SET status='closed' WHERE lead_id=?", (lead_id,))
             await remove_from_others(lead_id, note="🗑 Заявку видалено в CRM")
+            schedule_cleanup(lead_id)
             logger.info(f"Webhook: заявка {lead_id} видалена в CRM → закрито в боті")
         return {'ok': True}
 
@@ -140,6 +142,7 @@ async def amocrm_webhook(request: Request):
         if lead and lead['status'] not in ('taken', 'duplicate', 'closed'):
             q("UPDATE leads SET status='closed' WHERE lead_id=?", (lead_id,))
             await remove_from_others(lead_id, note="📋 Заявку переміщено в іншу воронку CRM")
+            schedule_cleanup(lead_id)
             logger.info(f"Webhook: заявка {lead_id} пішла в іншу воронку → закрито в боті")
         else:
             logger.info(f"Webhook: ігноруємо pipeline_id={pipeline_id} (не наша воронка)")
@@ -150,6 +153,7 @@ async def amocrm_webhook(request: Request):
         if lead and lead['status'] not in ('taken', 'duplicate', 'closed'):
             q("UPDATE leads SET status='closed' WHERE lead_id=?", (lead_id,))
             await remove_from_others(lead_id, note="📋 Заявку переміщено на інший етап в CRM")
+            schedule_cleanup(lead_id)
             logger.info(f"Webhook: заявка {lead_id} змінила статус → закрито в боті")
         return {'ok': True}
 

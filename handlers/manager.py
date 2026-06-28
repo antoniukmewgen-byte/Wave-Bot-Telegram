@@ -10,8 +10,8 @@ from db import (
     is_available, set_availability, mark_connected, mark_skipped, get_skipped, take_lead,
 )
 from kommo import set_kommo_responsible
-from notifications import notify_admins, notify_admin_error, edit_msg, remove_from_others
-from queue_logic import assign_next, day_key, build_keyboard
+from notifications import notify_admins, notify_admin_error, edit_msg, remove_from_others, schedule_cleanup, schedule_delete_msg
+from queue_logic import assign_next, day_key, build_keyboard, restore_buttons_for_manager
 from sheets import fetch_managers, get_block_reason
 
 logger = logging.getLogger(__name__)
@@ -92,6 +92,8 @@ async def on_work_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_availability(user_id, active, reason=None if active else 'manual')
     status = "✅ Ви в черзі — заявки надходитимуть" if active else "🚫 Ви вийшли з черги — заявки не надходитимуть"
     await update.message.reply_text(status, reply_markup=MANAGER_KB)
+    if active:
+        await restore_buttons_for_manager(user_id)
     logger.info(f"{name} {'увійшов в чергу' if active else 'вийшов з черги'}")
 
 
@@ -126,6 +128,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=work_keyboard(active),
                 parse_mode='HTML',
             )
+            if active:
+                await restore_buttons_for_manager(manager_id)
             logger.info(f"{name} {'увійшов в чергу' if active else 'вийшов з черги'}")
         except Exception as e:
             logger.error(f"on_callback work: {e}")
@@ -178,6 +182,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await edit_msg(manager_id, lead_id, f"✅ Ви взяли заявку в роботу! | Відповідальний: {mgr_name}\n\n{lead['title']}")
             await remove_from_others(lead_id, except_id=manager_id,
                                      note=f"✅ Заявку взяв(ла) <b>{mgr_name}</b>")
+            schedule_cleanup(lead_id)
             logger.info(f"Заявка {lead_id} взята {mgr_name} ({manager_id})")
             await notify_admins(f"✅ <b>{mgr_name}</b> взяв(ла) заявку в роботу\n\n{lead['title']}")
 
@@ -201,6 +206,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer()
             mark_skipped(lead_id, manager_id)
             await edit_msg(manager_id, lead_id, f"⏭ Ви відмовились від заявки\n\n{lead['title']}")
+            schedule_delete_msg(manager_id, lead_id)
 
             lead = get_lead(lead_id)
             if lead and lead['status'] == 'sent':
@@ -220,6 +226,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             q("UPDATE leads SET status='duplicate' WHERE lead_id=?", (lead_id,))
             await edit_msg(manager_id, lead_id, "🔁 Ви позначили заявку як дубль")
             await remove_from_others(lead_id, except_id=manager_id, note="🔁 Заявка закрита як дубль")
+            schedule_cleanup(lead_id)
             logger.info(f"Заявка {lead_id} — дубль ({mgr_name})")
 
         else:

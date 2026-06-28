@@ -13,15 +13,16 @@ logger = logging.getLogger(__name__)
 
 LIMIT_SELECT, LIMIT_INPUT = range(2)
 
-SCHED_SELECT, SCHED_DAYS, SCHED_TIME = range(3)
+SCHED_SELECT, SCHED_DAYS, SCHED_TIME, SCHED_END_TIME = range(4)
 
 DAYS_UA = {0: 'Пн', 1: 'Вт', 2: 'Ср', 3: 'Чт', 4: 'Пт', 5: 'Сб', 6: 'Нд'}
 
 
 def _format_schedule(sch: dict) -> str:
-    days = [DAYS_UA[int(d)] for d in sch['days'].split(',') if d.strip()]
+    days   = [DAYS_UA[int(d)] for d in sch['days'].split(',') if d.strip()]
     status = '✅' if sch.get('enabled', 1) else '❌'
-    return f"{status} {', '.join(days)} о {sch['start_time']}"
+    end    = sch.get('end_time', '23:00')
+    return f"{status} {', '.join(days)} {sch['start_time']}–{end}"
 
 
 # ─── CONVERSATION: ЛІМІТИ ────────────────────────────────────────────────────
@@ -189,7 +190,7 @@ async def schedules_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['sched_days'] = ','.join(str(d) for d in sorted(set(days)))
     cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Скасувати", callback_data="sched:cancel")]])
     await update.message.reply_text(
-        "Введіть час початку роботи у форматі <code>ГГ:ХХ</code>\nПриклад: <code>16:00</code>",
+        "Введіть час <b>початку</b> зміни у форматі <code>ГГ:ХХ</code>\nПриклад: <code>16:00</code>",
         parse_mode='HTML',
         reply_markup=cancel_kb,
     )
@@ -206,24 +207,55 @@ async def schedules_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         datetime.strptime(text, '%H:%M')
     except ValueError:
         await update.message.reply_text(
-            "❌ Невірний формат часу. Введіть у форматі <code>ГГ:ХХ</code>\nПриклад: <code>16:00</code>",
+            "❌ Невірний формат. Введіть у форматі <code>ГГ:ХХ</code>\nПриклад: <code>16:00</code>",
             parse_mode='HTML',
         )
         return SCHED_TIME
 
-    tg_id = context.user_data['sched_manager_id']
-    days  = context.user_data['sched_days']
-    set_schedule(tg_id, days, text)
+    context.user_data['sched_start'] = text
+    cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Скасувати", callback_data="sched:cancel")]])
+    await update.message.reply_text(
+        "Введіть час <b>кінця</b> зміни у форматі <code>ГГ:ХХ</code>\n"
+        "Приклад: <code>23:00</code>\n"
+        "<i>Якщо зміна переходить через північ (напр. 22:00–05:00) — просто введіть 05:00</i>",
+        parse_mode='HTML',
+        reply_markup=cancel_kb,
+    )
+    return SCHED_END_TIME
+
+
+async def schedules_end_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in ADMIN_IDS:
+        return ConversationHandler.END
+
+    text = update.message.text.strip()
+    try:
+        datetime.strptime(text, '%H:%M')
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Невірний формат. Введіть у форматі <code>ГГ:ХХ</code>\nПриклад: <code>23:00</code>",
+            parse_mode='HTML',
+        )
+        return SCHED_END_TIME
+
+    tg_id      = context.user_data['sched_manager_id']
+    days       = context.user_data['sched_days']
+    start_time = context.user_data['sched_start']
+    end_time   = text
+    set_schedule(tg_id, days, start_time, end_time)
 
     from handlers.admin import ADMIN_KB
     name     = state.MANAGERS_BY_ID.get(tg_id, tg_id)
     days_str = ', '.join(DAYS_UA[int(d)] for d in days.split(','))
+    crosses  = end_time <= start_time
+    note     = " (перехід через північ)" if crosses else ""
     await update.message.reply_text(
-        f"✅ Розклад збережено!\n<b>{name}</b>: {days_str} о {text}",
+        f"✅ Розклад збережено!\n<b>{name}</b>: {days_str} {start_time}–{end_time}{note}",
         reply_markup=ADMIN_KB,
         parse_mode='HTML',
     )
-    logger.info(f"Schedule: розклад {name} ({tg_id}) → {days} {text}")
+    logger.info(f"Schedule: {name} ({tg_id}) → {days} {start_time}–{end_time}")
     return ConversationHandler.END
 
 

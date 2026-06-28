@@ -102,6 +102,7 @@ def _migrate():
         "ALTER TABLE leads ADD COLUMN taken_at REAL",
         "ALTER TABLE availability ADD COLUMN max_leads INTEGER",
         "ALTER TABLE availability ADD COLUMN exit_reason TEXT",
+        "ALTER TABLE schedules ADD COLUMN end_time TEXT NOT NULL DEFAULT '23:00'",
     ]
     with sqlite3.connect(DB_PATH) as c:
         for sql in migrations:
@@ -272,11 +273,11 @@ def get_all_schedules() -> dict:
     return {r['manager_id']: dict(r) for r in rows} if rows else {}
 
 
-def set_schedule(manager_id: str, days: str, start_time: str):
+def set_schedule(manager_id: str, days: str, start_time: str, end_time: str):
     """days — рядок '0,1,2,3,4' (пн=0, нд=6)."""
-    q("""INSERT INTO schedules (manager_id, days, start_time) VALUES (?, ?, ?)
-         ON CONFLICT(manager_id) DO UPDATE SET days=?, start_time=?""",
-      (manager_id, days, start_time, days, start_time))
+    q("""INSERT INTO schedules (manager_id, days, start_time, end_time) VALUES (?, ?, ?, ?)
+         ON CONFLICT(manager_id) DO UPDATE SET days=?, start_time=?, end_time=?""",
+      (manager_id, days, start_time, end_time, days, start_time, end_time))
 
 
 def set_schedule_enabled(manager_id: str, enabled: bool):
@@ -296,11 +297,12 @@ def init_default_schedules(managers_map: dict):
     managers_map: {name: tg_id}
     """
     DEFAULTS = {
-        '7083918297': ('0,1,2,3,6', '22:00'),   # Льоша: пн-чт + нд
-        '8762578305': ('0,1,2,4,5', '16:00'),   # Федя:  пн-ср + пт-сб
+        '7083918297': ('0,1,2,3,6', '22:00', '05:00'),  # Льоша: пн-чт + нд, 22:00–05:00
+        '8762578305': ('0,1,2,4,5', '16:00', '23:00'),  # Федя:  пн-ср + пт-сб, 16:00–23:00
     }
-    DEFAULT_DAYS = '0,1,2,3,4'
-    DEFAULT_TIME = '16:00'
+    DEFAULT_DAYS      = '0,1,2,3,4'
+    DEFAULT_START     = '16:00'
+    DEFAULT_END       = '23:00'
 
     existing = set(r['manager_id'] for r in (q("SELECT manager_id FROM schedules", fetch='all') or []))
 
@@ -308,8 +310,8 @@ def init_default_schedules(managers_map: dict):
         for name, tg_id in managers_map.items():
             if tg_id in existing:
                 continue
-            days, start_time = DEFAULTS.get(tg_id, (DEFAULT_DAYS, DEFAULT_TIME))
+            days, start_time, end_time = DEFAULTS.get(tg_id, (DEFAULT_DAYS, DEFAULT_START, DEFAULT_END))
             c.execute(
-                "INSERT OR IGNORE INTO schedules (manager_id, days, start_time) VALUES (?,?,?)",
-                (tg_id, days, start_time),
+                "INSERT OR IGNORE INTO schedules (manager_id, days, start_time, end_time) VALUES (?,?,?,?)",
+                (tg_id, days, start_time, end_time),
             )

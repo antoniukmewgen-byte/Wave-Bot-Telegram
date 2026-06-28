@@ -129,3 +129,61 @@ async def remove_from_others(lead_id: str, except_id: str = None, note: str = "�
         if m['manager_id'] == except_id:
             continue
         await edit_msg(m['manager_id'], lead_id, note)
+
+
+async def _delete_all_msgs(lead_id: str):
+    for m in get_all_msgs(lead_id):
+        try:
+            await state._app.bot.delete_message(chat_id=m['manager_id'], message_id=m['msg_id'])
+        except Exception:
+            pass
+
+
+def schedule_cleanup(lead_id: str, delay: int = 30):
+    """Видаляє всі повідомлення по заявці через delay секунд."""
+    async def _task():
+        await asyncio.sleep(delay)
+        await _delete_all_msgs(lead_id)
+    asyncio.create_task(_task())
+
+
+def schedule_delete_msg(manager_id: str, lead_id: str, delay: int = 30):
+    """Видаляє смс конкретного менеджера через delay секунд."""
+    async def _task():
+        await asyncio.sleep(delay)
+        msg_id = get_msg_id(lead_id, manager_id)
+        if not msg_id:
+            return
+        try:
+            await state._app.bot.delete_message(chat_id=manager_id, message_id=msg_id)
+        except Exception:
+            pass
+    asyncio.create_task(_task())
+
+
+async def cleanup_stale_messages() -> int:
+    """
+    Видаляє в Telegram всі повідомлення по лідах зі статусом taken/duplicate/closed.
+    Повертає кількість видалених повідомлень.
+    """
+    rows = q("""
+        SELECT m.manager_id, m.lead_id, m.msg_id
+        FROM messages m
+        JOIN leads l ON l.lead_id = m.lead_id
+        WHERE l.status IN ('taken', 'duplicate', 'closed')
+    """, fetch='all')
+
+    if not rows:
+        return 0
+
+    deleted = 0
+    for r in rows:
+        try:
+            await state._app.bot.delete_message(chat_id=r['manager_id'], message_id=r['msg_id'])
+            deleted += 1
+        except Exception:
+            pass
+
+    if deleted:
+        logger.info(f"cleanup_stale_messages: видалено {deleted} застарілих повідомлень")
+    return deleted

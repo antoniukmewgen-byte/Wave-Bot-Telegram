@@ -10,9 +10,11 @@ from config import (
 from db import (
     q, get_lead, get_all_taken, get_all_availability, get_all_max_leads_overrides,
     get_skipped, get_all_schedules, update_last_notified, reset_all_limit_overrides, get_msg_id,
+    get_all_msgs,
 )
 from notifications import (
     notify_admins, notify_admin_error, send_to, edit_msg, delete_and_send, remove_from_others,
+    cleanup_stale_messages,
 )
 from sheets import fetch_managers
 
@@ -178,6 +180,39 @@ async def broadcast_to_all(lead_id: str, **tick_ctx):
     logger.info(f"Заявка {lead_id} розіслана всім ({len(queue)} менеджерів)")
 
 
+async def restore_buttons_for_manager(manager_id: str):
+    """Відновлює кнопки на активних лідах коли менеджер входить в чергу."""
+    rows = q("""
+        SELECT l.* FROM leads l
+        JOIN messages m ON m.lead_id = l.lead_id
+        WHERE m.manager_id = ?
+          AND l.status NOT IN ('taken', 'duplicate', 'closed')
+    """, (manager_id,), fetch='all')
+
+    if not rows:
+        return
+
+    for lead in rows:
+        lvl = lead['esc_level']
+        if lvl <= 1:
+            text = f"{lead['title']}\n👤 <i>Відкрита черга</i>"
+        elif lvl == 2:
+            text = f"⚠️⚠️⚠️ <b>ТЕРМІНОВО!</b>\nЗаявка без відповіді!\n\n{lead['title']}"
+        else:
+            text = f"🆘🚨💀🔴 <b>SOS!!!</b>\n\n{lead['title']}"
+
+        await edit_msg(manager_id, lead['lead_id'], text, keyboard=build_keyboard(lead['lead_id']))
+
+
+def _update_offline(queue_set: set, lead_id: str, text: str):
+    """Повертає coroutine-список для оновлення смс менеджерів поза чергою (без кнопок)."""
+    return [
+        edit_msg(m['manager_id'], lead_id, text)
+        for m in get_all_msgs(lead_id)
+        if m['manager_id'] not in queue_set
+    ]
+
+
 async def escalate_warn(lead_id: str, title: str, **tick_ctx):
     lead = get_lead(lead_id)
     if not lead or lead['status'] in ('taken', 'duplicate', 'closed'):
@@ -186,10 +221,13 @@ async def escalate_warn(lead_id: str, title: str, **tick_ctx):
         f"⚠️⚠️⚠️ <b>ТЕРМІНОВО!</b>\n"
         f"Заявка вже <b>5 хвилин</b> без відповіді!\n\n{title}"
     )
-    kb    = build_keyboard(lead_id)
-    queue = sorted_queue(exclude=get_skipped(lead_id), **tick_ctx)
+    kb        = build_keyboard(lead_id)
+    queue     = sorted_queue(exclude=get_skipped(lead_id), **tick_ctx)
+    queue_set = set(queue)
     for mid in queue:
         await delete_and_send(mid, lead_id, warn, kb)
+    for coro in _update_offline(queue_set, lead_id, warn):
+        await coro
     q("UPDATE leads SET esc_level=2 WHERE lead_id=?", (lead_id,))
     logger.info(f"Заявка {lead_id}: 5-хвилинне попередження")
 
@@ -202,10 +240,13 @@ async def escalate_sos(lead_id: str, title: str, **tick_ctx):
         f"🆘🚨💀🔴 <b>SOS!!! ЗАЯВКА 10 ХВИЛИН!!!</b> 🔴💀🚨🆘\n"
         f"😱🔥💥 ХТОСЬ ВІЗЬМІТЬ ВЖЕ! 💥🔥😱\n\n{title}"
     )
-    kb    = build_keyboard(lead_id)
-    queue = sorted_queue(exclude=get_skipped(lead_id), **tick_ctx)
+    kb        = build_keyboard(lead_id)
+    queue     = sorted_queue(exclude=get_skipped(lead_id), **tick_ctx)
+    queue_set = set(queue)
     for mid in queue:
         await delete_and_send(mid, lead_id, sos, kb)
+    for coro in _update_offline(queue_set, lead_id, sos):
+        await coro
     now = datetime.now().timestamp()
     q("UPDATE leads SET esc_level=3, last_rebroadcast_at=? WHERE lead_id=?", (now, lead_id))
     logger.info(f"Заявка {lead_id}: SOS 10 хвилин")
@@ -219,10 +260,13 @@ async def rebroadcast_periodic(lead_id: str, title: str, **tick_ctx):
         f"🔄 <b>Заявка досі не взята!</b>\n"
         f"⏰ Повторна розсилка — будь ласка, візьміть в роботу!\n\n{title}"
     )
-    kb    = build_keyboard(lead_id)
-    queue = sorted_queue(exclude=get_skipped(lead_id), **tick_ctx)
+    kb        = build_keyboard(lead_id)
+    queue     = sorted_queue(exclude=get_skipped(lead_id), **tick_ctx)
+    queue_set = set(queue)
     for mid in queue:
         await delete_and_send(mid, lead_id, msg, kb)
+    for coro in _update_offline(queue_set, lead_id, msg):
+        await coro
     q("UPDATE leads SET last_rebroadcast_at=? WHERE lead_id=?",
       (datetime.now().timestamp(), lead_id))
     logger.info(f"Заявка {lead_id}: повторна розсилка (кожні 30 хв)")
@@ -329,24 +373,53 @@ async def _tick():
 
 
 async def _check_schedules():
-    """Надсилає нагадування менеджерам на початку робочого дня."""
+    """Надсилає нагадування на початку зміни та автоматично виводить з черги в кінці."""
     from datetime import timezone
+    from db import set_availability
     tz           = timezone(timedelta(hours=3))
     now          = datetime.now(tz)
     today        = now.strftime('%Y-%m-%d')
     weekday      = now.weekday()
+    yesterday    = (weekday - 1) % 7
     current_time = now.strftime('%H:%M')
 
     schedules = get_all_schedules()
     for manager_id, sch in schedules.items():
         if not sch.get('enabled', 1):
             continue
+
+        days      = [int(d) for d in sch['days'].split(',') if d.strip()]
+        start     = sch.get('start_time', '16:00')
+        end       = sch.get('end_time', '23:00')
+        crosses   = end <= start  # зміна переходить через північ (напр. 22:00–05:00)
+
+        # ── Авто-деактивація в кінці зміни ──────────────────────────────────
+        if current_time == end:
+            # Звичайна зміна: сьогоднішній день має бути робочим
+            # Нічна зміна (crosses midnight): вчорашній день має бути робочим
+            working_day = yesterday if crosses else weekday
+            if working_day in days:
+                from db import is_available
+                if is_available(manager_id):
+                    set_availability(manager_id, False, reason='schedule')
+                    name = state.MANAGERS_BY_ID.get(manager_id, manager_id)
+                    try:
+                        await state._app.bot.send_message(
+                            chat_id=manager_id,
+                            text=f"🌙 <b>{name}</b>, твоя зміна закінчилась.\nТебе автоматично виведено з черги.",
+                            parse_mode='HTML',
+                        )
+                    except Exception:
+                        pass
+                    await notify_admins(f"🌙 <b>{name}</b> автоматично виведено з черги (кінець зміни)")
+                    logger.info(f"Schedule: {name} ({manager_id}) — авто-деактивація о {end}")
+
+        # ── Нагадування на початку зміни ─────────────────────────────────────
         if sch.get('last_notified') == today:
             continue
-        days = [int(d) for d in sch['days'].split(',') if d.strip()]
         if weekday not in days:
             continue
-        if current_time != sch['start_time']:
+        if current_time != start:
             continue
         try:
             name = state.MANAGERS_BY_ID.get(manager_id, manager_id)
@@ -383,9 +456,10 @@ def _cleanup_old_records():
 
 
 async def scheduler_loop():
-    last_cleanup = datetime.now().month
-    last_day     = datetime.now().day
-    last_sch_min = ''
+    last_cleanup      = datetime.now().month
+    last_day          = datetime.now().day
+    last_sch_min      = ''
+    last_msg_cleanup  = datetime.now().timestamp()
     while True:
         await asyncio.sleep(SCHEDULER_TICK)
         try:
@@ -401,6 +475,9 @@ async def scheduler_loop():
             if cur_min != last_sch_min:
                 last_sch_min = cur_min
                 await _check_schedules()
+            if now.timestamp() - last_msg_cleanup >= 300:
+                await cleanup_stale_messages()
+                last_msg_cleanup = now.timestamp()
         except Exception as e:
             logger.error(f"Scheduler помилка: {e}")
             await notify_admin_error("scheduler (фоновий планувальник)", e)
