@@ -15,7 +15,7 @@ from config import BOT_TOKEN, MANAGERS, WEBHOOK_PATH, AMO_PIPELINE_ID, AMO_HOT_S
 from db import init_db, q, get_lead, init_default_schedules
 from kommo import make_lead_title
 from notifications import notify_admin_error, remove_from_others, schedule_cleanup
-from queue_logic import assign_next, scheduler_loop
+from queue_logic import assign_next, scheduler_loop, deactivate_out_of_schedule
 from sheets import warmup
 
 from handlers.manager import on_start, on_work, on_work_button, on_callback
@@ -93,6 +93,7 @@ async def lifespan(fastapi: FastAPI):
     loop.run_in_executor(None, warmup)
     asyncio.create_task(app.updater.start_polling(allowed_updates=Update.ALL_TYPES))
     asyncio.create_task(scheduler_loop())
+    asyncio.create_task(deactivate_out_of_schedule())
     logger.info("Бот запущено")
     yield
     await app.updater.stop()

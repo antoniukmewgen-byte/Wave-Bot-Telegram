@@ -463,6 +463,48 @@ def _cleanup_old_records():
     logger.info(f"БД: очищено записи до {keep_from}")
 
 
+async def deactivate_out_of_schedule():
+    """При старті сервера виводить з черги менеджерів що зараз поза робочим часом."""
+    from datetime import timezone
+    from db import is_available, set_availability
+    tz           = timezone(timedelta(hours=3))
+    now          = datetime.now(tz)
+    weekday      = now.weekday()
+    yesterday    = (weekday - 1) % 7
+    current_time = now.strftime('%H:%M')
+
+    schedules = get_all_schedules()
+    for manager_id, sch in schedules.items():
+        if not sch.get('enabled', 1):
+            continue
+        if not is_available(manager_id):
+            continue
+
+        days    = [int(d) for d in sch['days'].split(',') if d.strip()]
+        start   = sch.get('start_time', '16:00')
+        end     = sch.get('end_time', '23:00')
+        crosses = end <= start  # зміна переходить через північ
+
+        if crosses:
+            in_shift = (current_time >= start and weekday in days) or \
+                       (current_time < end and yesterday in days)
+        else:
+            in_shift = weekday in days and start <= current_time < end
+
+        if not in_shift:
+            set_availability(manager_id, False, reason='schedule')
+            name = state.MANAGERS_BY_ID.get(manager_id, manager_id)
+            logger.info(f"Старт: {name} поза робочим часом → виведено з черги")
+            try:
+                await state._app.bot.send_message(
+                    chat_id=manager_id,
+                    text=f"🌙 <b>{name}</b>, твоя зміна закінчилась.\nТебе автоматично виведено з черги.",
+                    parse_mode='HTML',
+                )
+            except Exception:
+                pass
+
+
 async def scheduler_loop():
     last_cleanup      = datetime.now().month
     last_day          = datetime.now().day
