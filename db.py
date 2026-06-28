@@ -236,6 +236,10 @@ def save_msg(lead_id: str, manager_id: str, msg_id: int):
       (lead_id, manager_id, msg_id))
 
 
+def delete_msg(lead_id: str, manager_id: str):
+    q("DELETE FROM messages WHERE lead_id=? AND manager_id=?", (lead_id, manager_id))
+
+
 def get_all_msgs(lead_id: str) -> list[dict]:
     rows = q("SELECT manager_id, msg_id FROM messages WHERE lead_id=?",
              (lead_id,), fetch='all')

@@ -10,7 +10,7 @@ from config import (
 from db import (
     q, get_lead, get_all_taken, get_all_availability, get_all_max_leads_overrides,
     get_skipped, get_all_schedules, update_last_notified, reset_all_limit_overrides, get_msg_id,
-    get_all_msgs, claim_lead_for_send,
+    get_all_msgs, claim_lead_for_send, delete_msg,
 )
 from notifications import (
     notify_admins, notify_admin_error, send_to, edit_msg, delete_and_send, remove_from_others,
@@ -168,6 +168,9 @@ async def broadcast_to_all(lead_id: str, **tick_ctx):
                     await state._app.bot.delete_message(chat_id=orig_manager, message_id=msg_id)
                 except Exception as e:
                     logger.debug(f"broadcast queue: не вдалось видалити повідомлення у {orig_manager}: {e}")
+                # Видаляємо запис з messages незалежно від успіху видалення TG-повідомлення
+                # (уникаємо "привидів" — записів без реального повідомлення в Telegram)
+                delete_msg(lead_id, orig_manager)
         logger.info(f"Заявка {lead_id}: перейшла в broadcast, чекає черги (активна: {active_broadcast['lead_id']})")
         return
 
