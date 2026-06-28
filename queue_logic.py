@@ -503,6 +503,7 @@ async def deactivate_out_of_schedule():
                 )
             except Exception:
                 pass
+            await notify_admins(f"🌙 <b>{name}</b> автоматично виведено з черги (поза робочим часом при старті)")
 
 
 async def scheduler_loop():
