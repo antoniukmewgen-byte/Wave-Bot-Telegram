@@ -281,6 +281,14 @@ async def _send_next_queued_broadcast(**tick_ctx):
     if active:
         return
 
+    # Затримка 10с після того як хтось взяв лід — щоб не засипати менеджера одразу
+    recent = q(
+        "SELECT MAX(taken_at) as last FROM leads WHERE taken_at IS NOT NULL",
+        fetch='one',
+    )
+    if recent and recent['last'] and datetime.now().timestamp() - recent['last'] < 10:
+        return
+
     waiting = q(
         "SELECT * FROM leads WHERE status='broadcast' AND sent_at IS NULL ORDER BY created_at DESC LIMIT 1",
         fetch='one',
