@@ -1,6 +1,9 @@
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as _timezone
+
+# Єдина timezone для всього модуля (Київ, UTC+3)
+_TZ = _timezone(timedelta(hours=3))
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -10,7 +13,7 @@ from config import (
 from db import (
     q, get_lead, get_all_taken, get_all_availability, get_all_max_leads_overrides,
     get_skipped, get_all_schedules, update_last_notified, reset_all_limit_overrides, get_msg_id,
-    get_all_msgs, claim_lead_for_send, delete_msg,
+    get_all_msgs, claim_lead_for_send, delete_msg, is_available, set_availability,
 )
 from notifications import (
     notify_admins, notify_admin_error, send_to, edit_msg, delete_and_send, remove_from_others,
@@ -27,7 +30,7 @@ _tick_lock = asyncio.Lock()
 
 
 def day_key() -> str:
-    d = datetime.now()
+    d = datetime.now(_TZ)
     return f"{d.year}-{d.month:02d}-{d.day:02d}"
 
 
@@ -388,12 +391,26 @@ async def _tick():
         await _send_next_queued_broadcast(**tick_ctx)
 
 
+async def _send_shift_reminder(manager_id: str, name: str):
+    """Надсилає 3-хвильове нагадування про початок зміни у фоні."""
+    try:
+        await state._app.bot.send_message(chat_id=manager_id, text="⏰")
+        await asyncio.sleep(2)
+        await state._app.bot.send_message(chat_id=manager_id, text="⏰⏰")
+        await asyncio.sleep(2)
+        await state._app.bot.send_message(
+            chat_id=manager_id,
+            text=f"⏰⏰⏰ <b>{name}</b>, твій робочий час почався!\nНатисни «✅ Увійти в чергу» щоб почати отримувати заявки.",
+            parse_mode='HTML',
+        )
+        logger.info(f"Schedule: нагадування надіслано {name} ({manager_id})")
+    except Exception as e:
+        logger.warning(f"Schedule: не вдалось надіслати {manager_id}: {e}")
+
+
 async def _check_schedules():
     """Надсилає нагадування на початку зміни та автоматично виводить з черги в кінці."""
-    from datetime import timezone
-    from db import set_availability
-    tz           = timezone(timedelta(hours=3))
-    now          = datetime.now(tz)
+    now          = datetime.now(_TZ)
     today        = now.strftime('%Y-%m-%d')
     weekday      = now.weekday()
     yesterday    = (weekday - 1) % 7
@@ -411,11 +428,8 @@ async def _check_schedules():
 
         # ── Авто-деактивація в кінці зміни ──────────────────────────────────
         if current_time == end:
-            # Звичайна зміна: сьогоднішній день має бути робочим
-            # Нічна зміна (crosses midnight): вчорашній день має бути робочим
             working_day = yesterday if crosses else weekday
             if working_day in days:
-                from db import is_available
                 if is_available(manager_id):
                     set_availability(manager_id, False, reason='schedule')
                     name = state.MANAGERS_BY_ID.get(manager_id, manager_id)
@@ -437,21 +451,16 @@ async def _check_schedules():
             continue
         if current_time != start:
             continue
-        try:
-            name = state.MANAGERS_BY_ID.get(manager_id, manager_id)
-            await state._app.bot.send_message(chat_id=manager_id, text="⏰")
-            await asyncio.sleep(2)
-            await state._app.bot.send_message(chat_id=manager_id, text="⏰⏰")
-            await asyncio.sleep(2)
-            await state._app.bot.send_message(
-                chat_id=manager_id,
-                text=f"⏰⏰⏰ <b>{name}</b>, твій робочий час почався!\nНе забудь увімкнути бота — натисни «✅ Увійти в чергу» якщо ще не зробив це.",
-                parse_mode='HTML',
-            )
-            update_last_notified(manager_id, today)
-            logger.info(f"Schedule: нагадування надіслано {name} ({manager_id})")
-        except Exception as e:
-            logger.warning(f"Schedule: не вдалось надіслати {manager_id}: {e}")
+
+        name = state.MANAGERS_BY_ID.get(manager_id, manager_id)
+        update_last_notified(manager_id, today)
+
+        # Якщо менеджер вже в черзі — мовчки відмічаємо як повідомлений
+        if is_available(manager_id):
+            logger.info(f"Schedule: {name} вже в черзі — нагадування пропущено")
+            continue
+
+        asyncio.create_task(_send_shift_reminder(manager_id, name))
 
 
 def _reset_limit_overrides():
@@ -473,10 +482,7 @@ def _cleanup_old_records():
 
 async def deactivate_out_of_schedule():
     """При старті сервера виводить з черги менеджерів що зараз поза робочим часом."""
-    from datetime import timezone
-    from db import is_available, set_availability
-    tz           = timezone(timedelta(hours=3))
-    now          = datetime.now(tz)
+    now          = datetime.now(_TZ)
     weekday      = now.weekday()
     yesterday    = (weekday - 1) % 7
     current_time = now.strftime('%H:%M')
@@ -515,15 +521,16 @@ async def deactivate_out_of_schedule():
 
 
 async def scheduler_loop():
-    last_cleanup      = datetime.now().month
-    last_day          = datetime.now().day
+    _now_tz          = lambda: datetime.now(_TZ)
+    last_cleanup      = _now_tz().month
+    last_day          = _now_tz().day
     last_sch_min      = ''
-    last_msg_cleanup  = datetime.now().timestamp()
+    last_msg_cleanup  = _now_tz().timestamp()
     while True:
         await asyncio.sleep(SCHEDULER_TICK)
         try:
             await _tick()
-            now = datetime.now()
+            now = _now_tz()
             if now.day != last_day:
                 _reset_limit_overrides()
                 last_day = now.day

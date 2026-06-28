@@ -276,6 +276,12 @@ def set_availability(manager_id: str, active: bool, reason: str = None):
       (manager_id, int(active), exit_reason, int(active), exit_reason))
 
 
+def get_last_connected_ts(manager_id: str) -> float:
+    """Повертає timestamp останнього підключення або 0.0 якщо ніколи."""
+    row = q("SELECT connected_at FROM connected WHERE manager_id=?", (manager_id,), fetch='one')
+    return float(row['connected_at']) if row else 0.0
+
+
 def mark_connected(manager_id: str, name: str):
     ts = datetime.now().timestamp()
     q("""INSERT INTO connected (manager_id, name, connected_at) VALUES (?,?,?)

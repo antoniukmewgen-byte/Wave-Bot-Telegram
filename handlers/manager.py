@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -8,9 +9,10 @@ from config import ADMIN_IDS, MANAGERS
 from db import (
     q, get_lead, get_taken, get_all_max_leads_overrides,
     is_available, set_availability, mark_connected, mark_skipped, get_skipped, take_lead,
+    get_last_connected_ts,
 )
 from kommo import set_kommo_responsible
-from notifications import notify_admins, notify_admin_error, edit_msg, remove_from_others, schedule_cleanup, schedule_delete_msg
+from notifications import notify_admins, notify_admin_error, edit_msg, remove_from_others, schedule_cleanup, schedule_delete_msg, remove_buttons_for_manager
 from queue_logic import assign_next, day_key, build_keyboard, restore_buttons_for_manager
 from sheets import fetch_managers, get_block_reason
 
@@ -42,7 +44,12 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     from handlers.admin import ADMIN_KB
     mgr_name = state.MANAGERS_BY_ID.get(user_id, user_name)
+
+    # Запам'ятовуємо попередній час підключення ДО оновлення
+    prev_connected_ts = get_last_connected_ts(user_id)
     mark_connected(user_id, mgr_name)
+    # Оновлюємо runtime-словник щоб логи та повідомлення завжди мали актуальне ім'я
+    state.MANAGERS_BY_ID[user_id] = mgr_name
 
     if is_admin:
         await update.message.reply_text("👋 Вітаю, адміне!\nОберіть дію:", reply_markup=ADMIN_KB)
@@ -55,7 +62,11 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     if not is_admin:
-        await notify_admins(f"✅ <b>{mgr_name}</b> підключив(ла) бота\n👤 ID: <code>{user_id}</code>")
+        # Throttle: не спамимо адмінам якщо менеджер перепідключився менше ніж 5 хв тому
+        # (наприклад після рестарту сервера всі менеджери одразу тиснуть /start)
+        just_reconnected = datetime.now().timestamp() - prev_connected_ts < 300
+        if not just_reconnected:
+            await notify_admins(f"✅ <b>{mgr_name}</b> підключив(ла) бота\n👤 ID: <code>{user_id}</code>")
 
 
 async def on_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -94,6 +105,8 @@ async def on_work_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(status, reply_markup=MANAGER_KB)
     if active:
         await restore_buttons_for_manager(user_id)
+    else:
+        await remove_buttons_for_manager(user_id)
     logger.info(f"{name} {'увійшов в чергу' if active else 'вийшов з черги'}")
 
 
@@ -130,6 +143,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             if active:
                 await restore_buttons_for_manager(manager_id)
+            else:
+                await remove_buttons_for_manager(manager_id)
             logger.info(f"{name} {'увійшов в чергу' if active else 'вийшов з черги'}")
         except Exception as e:
             logger.error(f"on_callback work: {e}")
@@ -210,7 +225,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             lead = get_lead(lead_id)
             if lead and lead['status'] == 'sent':
-                q("UPDATE leads SET status='queued', manager_id=NULL WHERE lead_id=?", (lead_id,))
+                q("UPDATE leads SET status='queued', manager_id=NULL, sent_at=NULL WHERE lead_id=?", (lead_id,))
                 await assign_next(lead_id, exclude=get_skipped(lead_id))
             logger.info(f"Заявка {lead_id} відхилена {mgr_name}")
 

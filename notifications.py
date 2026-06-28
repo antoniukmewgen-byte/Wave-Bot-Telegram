@@ -124,6 +124,18 @@ async def delete_and_send(manager_id: str, lead_id: str, text: str, keyboard):
     await send_to(manager_id, lead_id, text, keyboard)
 
 
+async def remove_buttons_for_manager(manager_id: str):
+    """При виході з черги — прибирає кнопки з усіх активних повідомлень менеджера."""
+    rows = q("""
+        SELECT l.lead_id, l.title FROM leads l
+        JOIN messages m ON m.lead_id = l.lead_id
+        WHERE m.manager_id = ?
+          AND l.status NOT IN ('taken', 'duplicate', 'closed')
+    """, (manager_id,), fetch='all')
+    for lead in (rows or []):
+        await edit_msg(manager_id, lead['lead_id'], f"⏸ Ви вийшли з черги\n\n{lead['title']}")
+
+
 async def remove_from_others(lead_id: str, except_id: str = None, note: str = "✅ Заявку вже взято в роботу"):
     for m in get_all_msgs(lead_id):
         if m['manager_id'] == except_id:
@@ -183,6 +195,8 @@ async def cleanup_stale_messages() -> int:
             deleted += 1
         except Exception:
             pass
+        # Видаляємо запис незалежно від успіху — щоб не повторювати спробу наступного разу
+        q("DELETE FROM messages WHERE lead_id=? AND manager_id=?", (r['manager_id'], r['lead_id']))
 
     if deleted:
         logger.info(f"cleanup_stale_messages: видалено {deleted} застарілих повідомлень")
