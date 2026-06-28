@@ -33,8 +33,9 @@ def _init_pool():
 
 def _get_conn() -> sqlite3.Connection:
     try:
-        return _pool.get_nowait()
+        return _pool.get(timeout=5)
     except Exception:
+        logger.warning("DB: пул з'єднань вичерпано, створюємо тимчасовий конект")
         return _make_conn()
 
 
@@ -173,6 +174,28 @@ def inc_taken(manager_id: str, month: str):
     q("""INSERT INTO stats (manager_id, month, taken) VALUES (?,?,1)
          ON CONFLICT(manager_id, month) DO UPDATE SET taken = taken + 1""",
       (manager_id, month))
+
+
+def claim_lead_for_send(lead_id: str, manager_id: str) -> bool:
+    """Атомарно «бронює» заявку для надсилання. Повертає True якщо заброньовано цим менеджером."""
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE leads SET status='sent', manager_id=?, sent_at=? "
+            "WHERE lead_id=? AND status IN ('queued','no_managers')",
+            (manager_id, datetime.now().timestamp(), lead_id),
+        )
+        if cur.rowcount == 0:
+            conn.rollback()
+            return False
+        conn.commit()
+        return True
+    except sqlite3.Error as e:
+        conn.rollback()
+        logger.error(f"claim_lead_for_send | lead={lead_id} mgr={manager_id} | {e}")
+        raise
+    finally:
+        _release_conn(conn)
 
 
 def take_lead(lead_id: str, manager_id: str, month: str) -> bool:

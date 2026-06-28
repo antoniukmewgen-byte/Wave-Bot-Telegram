@@ -30,6 +30,7 @@ def _format_schedule(sch: dict) -> str:
 async def limits_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ У вас немає доступу до цієї функції.")
         return ConversationHandler.END
 
     managers  = fetch_managers()
@@ -87,6 +88,7 @@ async def limits_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def limits_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ У вас немає доступу до цієї функції.")
         return ConversationHandler.END
 
     text = update.message.text.strip()
@@ -100,6 +102,7 @@ async def limits_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     max_leads = None if value == 0 else value
 
     set_max_leads_override(tg_id, max_leads)
+    context.user_data.clear()
 
     from handlers.admin import ADMIN_KB
     lim_str = "∞ (без ліміту, з таблиці)" if max_leads is None else str(max_leads)
@@ -112,6 +115,7 @@ async def limits_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def limits_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
     from handlers.admin import ADMIN_KB
     await update.message.reply_text("❌ Скасовано", reply_markup=ADMIN_KB)
     return ConversationHandler.END
@@ -122,6 +126,7 @@ async def limits_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def schedules_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ У вас немає доступу до цієї функції.")
         return ConversationHandler.END
 
     schedules = get_all_schedules()
@@ -174,6 +179,7 @@ async def schedules_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def schedules_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ У вас немає доступу до цієї функції.")
         return ConversationHandler.END
 
     text = update.message.text.strip()
@@ -200,6 +206,7 @@ async def schedules_days(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def schedules_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ У вас немає доступу до цієї функції.")
         return ConversationHandler.END
 
     text = update.message.text.strip()
@@ -227,6 +234,7 @@ async def schedules_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def schedules_end_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ У вас немає доступу до цієї функції.")
         return ConversationHandler.END
 
     text = update.message.text.strip()
@@ -244,6 +252,7 @@ async def schedules_end_time(update: Update, context: ContextTypes.DEFAULT_TYPE)
     start_time = context.user_data['sched_start']
     end_time   = text
     set_schedule(tg_id, days, start_time, end_time)
+    context.user_data.clear()
 
     from handlers.admin import ADMIN_KB
     name     = state.MANAGERS_BY_ID.get(tg_id, tg_id)
@@ -260,6 +269,7 @@ async def schedules_end_time(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def schedules_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
     from handlers.admin import ADMIN_KB
     await update.message.reply_text("❌ Скасовано", reply_markup=ADMIN_KB)
     return ConversationHandler.END

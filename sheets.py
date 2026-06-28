@@ -80,10 +80,12 @@ def fetch_managers() -> Dict[str, dict]:
     """
     global _cache, _cache_ts
 
-    now      = datetime.now().timestamp()
-    cache_ts = _cache_ts if isinstance(_cache_ts, float) else 0.0
-    if now - cache_ts < SHEETS_REFRESH and _cache:
-        return _cache
+    now = datetime.now().timestamp()
+    # Читаємо у локальні змінні — захист від зміни глобалів між перевіркою і поверненням
+    cache_ts = _cache_ts
+    cache    = _cache
+    if now - cache_ts < SHEETS_REFRESH and cache:
+        return cache
 
     with _lock:
         # Повторна перевірка після отримання lock (інший потік міг вже оновити кеш)

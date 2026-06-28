@@ -5,7 +5,7 @@ from telegram.error import Forbidden, RetryAfter, TimedOut, NetworkError
 
 import state
 from config import ADMIN_IDS
-from db import get_msg_id, save_msg, get_all_msgs, set_availability
+from db import q, get_msg_id, save_msg, get_all_msgs, set_availability
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +32,8 @@ async def notify_admins(text: str):
     for admin_id in ADMIN_IDS:
         try:
             await state._app.bot.send_message(chat_id=admin_id, text=text, parse_mode='HTML')
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"notify_admins: не вдалось надіслати адміну {admin_id}: {e}")
 
 
 async def notify_admin_error(where: str, error: Exception, manager_id: str = None):

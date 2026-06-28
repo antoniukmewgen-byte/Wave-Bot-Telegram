@@ -10,7 +10,7 @@ from config import (
 from db import (
     q, get_lead, get_all_taken, get_all_availability, get_all_max_leads_overrides,
     get_skipped, get_all_schedules, update_last_notified, reset_all_limit_overrides, get_msg_id,
-    get_all_msgs,
+    get_all_msgs, claim_lead_for_send,
 )
 from notifications import (
     notify_admins, notify_admin_error, send_to, edit_msg, delete_and_send, remove_from_others,
@@ -122,13 +122,18 @@ async def assign_next(lead_id: str, exclude: list[str] = None):
     if not lead:
         return
 
+    # Атомарно бронюємо заявку ПЕРЕД відправкою — захист від паралельних assign_next
+    if not claim_lead_for_send(lead_id, manager_id):
+        logger.info(f"assign_next: заявка {lead_id} вже зайнята іншим менеджером — пропускаємо")
+        return
+
     text = f"{lead['title']}\n👤 <i>Черга: {manager_name}</i>"
     try:
         await send_to(manager_id, lead_id, text, build_keyboard(lead_id))
-        q("UPDATE leads SET status='sent', manager_id=?, sent_at=? WHERE lead_id=?",
-          (manager_id, datetime.now().timestamp(), lead_id))
         logger.info(f"Заявка {lead_id} → {manager_name} ({manager_id})")
     except Exception as e:
+        # Повертаємо заявку в чергу якщо відправка не вдалась
+        q("UPDATE leads SET status='queued', manager_id=NULL, sent_at=NULL WHERE lead_id=?", (lead_id,))
         logger.error(f"assign_next відправка {lead_id} → {manager_id}: {e}")
         await notify_admin_error(f"assign_next (відправка заявки #{lead_id})", e, manager_id)
 

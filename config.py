@@ -3,13 +3,24 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BOT_TOKEN      = os.environ['BOT_TOKEN']
+
+def _require(key: str) -> str:
+    val = os.environ.get(key, '').strip()
+    if not val:
+        raise RuntimeError(
+            f"Відсутня обов'язкова змінна середовища: {key}\n"
+            f"Переконайтесь що файл .env існує і містить {key}=..."
+        )
+    return val
+
+
+BOT_TOKEN      = _require('BOT_TOKEN')
 AMO_SUBDOMAIN     = os.environ.get('AMO_SUBDOMAIN', 'movenation')
 AMO_TOKEN         = os.environ.get('AMO_TOKEN', '')
 AMO_PIPELINE_ID   = os.environ.get('AMO_PIPELINE_ID', '10815171')
 AMO_HOT_STATUS_ID = os.environ.get('AMO_HOT_STATUS_ID', '85731907')
 WEBHOOK_PATH   = os.environ.get('WEBHOOK_PATH', 'movenation')
-SHEETS_ID      = os.environ['SHEETS_ID']
+SHEETS_ID      = _require('SHEETS_ID')
 SHEET_NAME     = os.environ.get('SHEET_NAME', 'План|Факт|Мотивація Мдж')
 GOOGLE_CREDS   = os.environ.get('GOOGLE_CREDS', 'google_creds.json')
 ADMIN_IDS      = [i.strip() for i in os.environ.get('ADMIN_IDS', '').split(',') if i.strip()]

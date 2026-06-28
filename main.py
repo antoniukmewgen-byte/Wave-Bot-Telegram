@@ -90,10 +90,29 @@ async def lifespan(fastapi: FastAPI):
     await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
     loop = asyncio.get_event_loop()
-    loop.run_in_executor(None, warmup)
-    asyncio.create_task(app.updater.start_polling(allowed_updates=Update.ALL_TYPES))
-    asyncio.create_task(scheduler_loop())
-    asyncio.create_task(deactivate_out_of_schedule())
+    future = loop.run_in_executor(None, warmup)
+    future.add_done_callback(
+        lambda f: logger.error(f"Sheets warmup failed: {f.exception()}") if f.exception() else None
+    )
+
+    def _task_error_handler(task: asyncio.Task):
+        if not task.cancelled() and task.exception():
+            logger.error(f"Фонова задача '{task.get_name()}' впала: {task.exception()}")
+
+    async def _safe_deactivate():
+        try:
+            await deactivate_out_of_schedule()
+        except Exception as e:
+            logger.error(f"deactivate_out_of_schedule: {e}")
+
+    for coro, name in [
+        (app.updater.start_polling(allowed_updates=Update.ALL_TYPES), 'polling'),
+        (scheduler_loop(), 'scheduler'),
+        (_safe_deactivate(), 'deactivate_on_start'),
+    ]:
+        t = asyncio.create_task(coro, name=name)
+        t.add_done_callback(_task_error_handler)
+
     logger.info("Бот запущено")
     yield
     await app.updater.stop()
@@ -128,6 +147,12 @@ async def amocrm_webhook(request: Request):
 
     if not lead_id:
         return {'ok': True}
+
+    # Базова валідація: lead_id має бути числовим рядком
+    if not str(lead_id).strip().isdigit():
+        logger.warning(f"Webhook: невалідний lead_id={lead_id!r} — ігноруємо")
+        return {'ok': True}
+    lead_id = str(lead_id).strip()
 
     if is_delete:
         lead = get_lead(lead_id)
