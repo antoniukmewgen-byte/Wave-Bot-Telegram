@@ -5,6 +5,7 @@ from datetime import datetime
 
 from fastapi import FastAPI, Request
 from telegram import BotCommand, MenuButtonCommands, Update
+from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application, CallbackQueryHandler, CommandHandler,
     ConversationHandler, MessageHandler, filters,
@@ -38,7 +39,17 @@ async def lifespan(fastapi: FastAPI):
     init_db()
     init_default_schedules(MANAGERS)
 
-    state._app = Application.builder().token(BOT_TOKEN).build()
+    state._app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .request(HTTPXRequest(
+            read_timeout=15,
+            write_timeout=15,
+            connect_timeout=10,
+            pool_timeout=10,
+        ))
+        .build()
+    )
     app = state._app
 
     _lim_entry = MessageHandler(filters.TEXT & filters.Regex(r'^⚙️ Ліміти$'), limits_start)
