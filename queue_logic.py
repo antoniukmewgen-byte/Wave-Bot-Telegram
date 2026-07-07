@@ -192,7 +192,10 @@ async def broadcast_to_all(lead_id: str, **tick_ctx):
 
 
 async def restore_buttons_for_manager(manager_id: str):
-    """Відновлює кнопки на активних лідах коли менеджер входить в чергу."""
+    """Відновлює кнопки на активних лідах коли менеджер входить в чергу.
+    Також надсилає broadcast заявки що вже активні але ще не приходили цьому менеджеру."""
+
+    # 1. Відновлюємо кнопки на вже надісланих повідомленнях
     rows = q("""
         SELECT l.* FROM leads l
         JOIN messages m ON m.lead_id = l.lead_id
@@ -200,10 +203,7 @@ async def restore_buttons_for_manager(manager_id: str):
           AND l.status NOT IN ('taken', 'duplicate', 'closed')
     """, (manager_id,), fetch='all')
 
-    if not rows:
-        return
-
-    for lead in rows:
+    for lead in (rows or []):
         lvl = lead['esc_level']
         if lvl <= 1:
             text = f"{lead['title']}\n👤 <i>Відкрита черга</i>"
@@ -211,8 +211,34 @@ async def restore_buttons_for_manager(manager_id: str):
             text = f"⚠️⚠️⚠️ <b>ТЕРМІНОВО!</b>\nЗаявка без відповіді!\n\n{lead['title']}"
         else:
             text = f"🆘🚨💀🔴 <b>SOS!!!</b>\n\n{lead['title']}"
-
         await edit_msg(manager_id, lead['lead_id'], text, keyboard=build_keyboard(lead['lead_id']))
+
+    # 2. Надсилаємо активні broadcast заявки що ще не приходили цьому менеджеру
+    broadcast_leads = q("""
+        SELECT l.* FROM leads l
+        WHERE l.status = 'broadcast'
+          AND l.sent_at IS NOT NULL
+          AND l.lead_id NOT IN (
+              SELECT lead_id FROM messages WHERE manager_id = ?
+          )
+          AND l.lead_id NOT IN (
+              SELECT lead_id FROM skipped WHERE manager_id = ?
+          )
+    """, (manager_id, manager_id), fetch='all')
+
+    for lead in (broadcast_leads or []):
+        lvl = lead['esc_level']
+        if lvl <= 1:
+            text = f"{lead['title']}\n👤 <i>Відкрита черга</i>"
+        elif lvl == 2:
+            text = f"⚠️⚠️⚠️ <b>ТЕРМІНОВО!</b>\nЗаявка без відповіді!\n\n{lead['title']}"
+        else:
+            text = f"🆘🚨💀🔴 <b>SOS!!!</b>\n\n{lead['title']}"
+        try:
+            await send_to(manager_id, lead['lead_id'], text, build_keyboard(lead['lead_id']))
+            logger.info(f"restore: надіслано broadcast заявку {lead['lead_id']} → {manager_id}")
+        except Exception as e:
+            logger.error(f"restore: не вдалось надіслати {lead['lead_id']} → {manager_id}: {e}")
 
 
 def _update_offline(queue_set: set, lead_id: str, text: str):

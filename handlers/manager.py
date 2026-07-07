@@ -2,6 +2,7 @@ import logging
 from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 import state
@@ -247,6 +248,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.answer()
 
+    except BadRequest as e:
+        # Callback query протух (>10 хв) або вже оброблений — не спамимо адміну
+        if 'query is too old' in str(e).lower() or 'query id is invalid' in str(e).lower():
+            logger.warning(f"on_callback {action} {lead_id}: callback протух — {e}")
+        else:
+            logger.error(f"on_callback {action} {lead_id}: {e}")
+            await notify_admin_error(f"on_callback (дія: {action}, заявка: {lead_id})", e, manager_id)
     except Exception as e:
         logger.error(f"on_callback {action} {lead_id}: {e}")
         try:
