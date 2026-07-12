@@ -155,6 +155,7 @@ async def _delete_all_msgs(lead_id: str):
             await state._app.bot.delete_message(chat_id=m['manager_id'], message_id=m['msg_id'])
         except Exception:
             pass
+        q("DELETE FROM messages WHERE lead_id=? AND manager_id=?", (lead_id, m['manager_id']))
 
 
 def schedule_cleanup(lead_id: str, delay: int = 30):
