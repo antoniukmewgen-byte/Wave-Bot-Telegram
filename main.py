@@ -100,7 +100,10 @@ async def lifespan(fastapi: FastAPI):
         allow_reentry=True,
     ))
 
-    app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(CallbackQueryHandler(
+        on_callback,
+        pattern=r'^(?!reg:|reg_sheet:|reg_kommo:|mgr_approve:|mgr_reject:)',
+    ))
     app.add_handler(CommandHandler('start', on_start))
     app.add_handler(CommandHandler('work', on_work))
     app.add_handler(MessageHandler(
