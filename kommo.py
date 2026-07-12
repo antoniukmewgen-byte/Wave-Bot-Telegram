@@ -45,7 +45,7 @@ async def get_kommo_users() -> list:
         return []
 
 
-async def get_lead_responsible(lead_id: str) -> int | None:
+async def get_lead_responsible(lead_id: str):
     """
     Повертає responsible_user_id заявки з Kommo API.
     Використовується щоб визначити менеджера при отриманні webhook 'Распределены'.
