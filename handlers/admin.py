@@ -62,7 +62,9 @@ async def _handle_manager_status(message, managers: dict):
             lines.append(f"(БОТ ⛔) {name} — ліміт вичерпано | взяв: {taken}/{limit_str}")
         elif not is_active:
             reason = exit_reasons.get(tg_id)
-            if reason == 'blocked':
+            if reason == 'has_distributed':
+                lines.append(f"(БОТ 📞) {name} — на зв'язку з клієнтом | взяв: {taken}/{limit_str}")
+            elif reason == 'blocked':
                 lines.append(f"(БОТ 🔒) {name} — недостатні показники | взяв: {taken}/{limit_str}")
             elif reason == 'bot_blocked':
                 lines.append(f"(БОТ 🔕) {name} — заблокував бота | взяв: {taken}/{limit_str}")

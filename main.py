@@ -12,11 +12,15 @@ from telegram.ext import (
 )
 
 import state
-from config import BOT_TOKEN, WEBHOOK_PATH, AMO_PIPELINE_ID, AMO_HOT_STATUS_ID
-from db import init_db, q, get_lead, init_default_schedules, get_managers_dict
+from config import (
+    BOT_TOKEN, WEBHOOK_PATH,
+    AMO_PIPELINE_ID, AMO_HOT_STATUS_ID,
+    AMO_DISTRIBUTED_STATUS_ID, AMO_DISTRIBUTED_PIPELINE_ID,
+)
+from db import init_db, q, get_lead, init_default_schedules, get_managers_dict, get_distributed_lead
 from kommo import make_lead_title
 from notifications import notify_admin_error, remove_from_others, schedule_cleanup
-from queue_logic import assign_next, scheduler_loop, deactivate_out_of_schedule
+from queue_logic import assign_next, scheduler_loop, deactivate_out_of_schedule, on_lead_distributed, on_lead_undistributed
 from sheets import warmup
 
 from handlers.manager import on_start, on_work, on_work_button, on_callback
@@ -197,6 +201,23 @@ async def amocrm_webhook(request: Request):
             schedule_cleanup(lead_id)
             logger.info(f"Webhook: заявка {lead_id} видалена в CRM → закрито в боті")
         return {'ok': True}
+
+    # ── Заявка перейшла в статус "Распределены" ─────────────────────────────
+    if (str(pipeline_id) == AMO_DISTRIBUTED_PIPELINE_ID
+            and str(status_id) == AMO_DISTRIBUTED_STATUS_ID):
+        logger.info(f"Webhook: заявка {lead_id} → 'Распределены'")
+        asyncio.create_task(on_lead_distributed(lead_id))
+        return {'ok': True}
+
+    # ── Заявка покинула статус "Распределены" ───────────────────────────────
+    distributed_row = get_distributed_lead(lead_id)
+    if distributed_row:
+        logger.info(
+            f"Webhook: заявка {lead_id} покинула 'Распределены' "
+            f"(менеджер {distributed_row['manager_id']})"
+        )
+        asyncio.create_task(on_lead_undistributed(lead_id, distributed_row['manager_id']))
+        # Не повертаємось — продовжуємо стандартну обробку (закриття в боті)
 
     if str(pipeline_id) != AMO_PIPELINE_ID:
         lead = get_lead(lead_id)

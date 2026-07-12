@@ -15,10 +15,12 @@ def _require(key: str) -> str:
 
 
 BOT_TOKEN      = _require('BOT_TOKEN')
-AMO_SUBDOMAIN     = os.environ.get('AMO_SUBDOMAIN', 'movenation')
-AMO_TOKEN         = os.environ.get('AMO_TOKEN', '')
-AMO_PIPELINE_ID   = os.environ.get('AMO_PIPELINE_ID', '10815171')
-AMO_HOT_STATUS_ID = os.environ.get('AMO_HOT_STATUS_ID', '85731907')
+AMO_SUBDOMAIN              = os.environ.get('AMO_SUBDOMAIN', 'movenation')
+AMO_TOKEN                  = os.environ.get('AMO_TOKEN', '')
+AMO_PIPELINE_ID            = os.environ.get('AMO_PIPELINE_ID', '10815171')
+AMO_HOT_STATUS_ID          = os.environ.get('AMO_HOT_STATUS_ID', '85731907')
+AMO_DISTRIBUTED_STATUS_ID   = os.environ.get('AMO_DISTRIBUTED_STATUS_ID', '98056416')
+AMO_DISTRIBUTED_PIPELINE_ID = os.environ.get('AMO_DISTRIBUTED_PIPELINE_ID', '12703972')
 WEBHOOK_PATH   = os.environ.get('WEBHOOK_PATH', 'movenation')
 SHEETS_ID      = _require('SHEETS_ID')
 SHEET_NAME     = os.environ.get('SHEET_NAME', 'План|Факт|Мотивація Мдж')

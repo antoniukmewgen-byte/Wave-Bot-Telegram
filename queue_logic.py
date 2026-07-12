@@ -14,10 +14,12 @@ from db import (
     q, get_lead, get_all_taken, get_all_availability, get_all_max_leads_overrides,
     get_skipped, get_all_schedules, update_last_notified, reset_all_limit_overrides, get_msg_id,
     get_all_msgs, claim_lead_for_send, delete_msg, is_available, set_availability,
+    get_all_managers, get_manager,
+    add_distributed_lead, remove_distributed_lead, count_distributed_leads,
 )
 from notifications import (
     notify_admins, notify_admin_error, send_to, edit_msg, delete_and_send, remove_from_others,
-    cleanup_stale_messages,
+    cleanup_stale_messages, remove_buttons_for_manager,
 )
 from sheets import fetch_managers
 
@@ -573,3 +575,102 @@ async def scheduler_loop():
         except Exception as e:
             logger.error(f"Scheduler помилка: {e}")
             await notify_admin_error("scheduler (фоновий планувальник)", e)
+
+
+# ─── Розподілені заявки (Распределены) ───────────────────────────────────────
+
+async def on_lead_distributed(lead_id: str):
+    """
+    Викликається коли заявка переходить в статус 'Распределены'.
+    Визначає відповідального менеджера і виводить його з черги.
+    """
+    from kommo import get_lead_responsible
+
+    responsible_kommo_id = await get_lead_responsible(lead_id)
+    if not responsible_kommo_id:
+        logger.warning(f"on_lead_distributed: не вдалось отримати responsible для заявки {lead_id}")
+        return
+
+    mgr = next(
+        (m for m in get_all_managers(approved_only=True)
+         if m['kommo_id'] == responsible_kommo_id),
+        None,
+    )
+    if not mgr:
+        logger.info(
+            f"on_lead_distributed: менеджер з kommo_id={responsible_kommo_id} "
+            f"не знайдений у БД (заявка {lead_id})"
+        )
+        return
+
+    manager_id = mgr['tg_id']
+    name       = mgr['sheet_name'] or mgr['tg_name'] or manager_id
+
+    add_distributed_lead(lead_id, manager_id)
+    # Виводимо з черги тільки якщо менеджер зараз активний —
+    # якщо він вже вийшов вручну або за розкладом, не перетираємо його причину виходу
+    if is_available(manager_id):
+        set_availability(manager_id, False, reason='has_distributed')
+    # Знімаємо кнопки з усіх активних заявок що вже надіслані менеджеру
+    await remove_buttons_for_manager(manager_id)
+    logger.info(f"on_lead_distributed: {name} ({manager_id}) → виведено з черги (заявка {lead_id})")
+
+    try:
+        await state._app.bot.send_message(
+            chat_id=manager_id,
+            text=(
+                "🚫 <b>Вас виведено з черги</b>\n\n"
+                "У вас є заявка в статусі <b>\"Распределены\"</b> в CRM.\n"
+                "Після закриття або передачі заявки — ви повернетесь в чергу автоматично."
+            ),
+            parse_mode='HTML',
+        )
+    except Exception as e:
+        logger.warning(f"on_lead_distributed: не вдалось повідомити {manager_id}: {e}")
+
+
+async def on_lead_undistributed(lead_id: str, manager_id: str):
+    """
+    Викликається коли заявка покидає статус 'Распределены'.
+    Якщо у менеджера більше немає таких заявок — повертає його в чергу.
+    """
+    remove_distributed_lead(lead_id)
+
+    remaining = count_distributed_leads(manager_id)
+    if remaining > 0:
+        logger.info(
+            f"on_lead_undistributed: {manager_id} ще має {remaining} заявок у 'Распределены'"
+        )
+        return
+
+    mgr = get_manager(manager_id)
+    if not mgr:
+        return
+
+    name = mgr['sheet_name'] or mgr['tg_name'] or manager_id
+
+    # Повертаємо в чергу тільки якщо причина виходу саме 'has_distributed' —
+    # якщо менеджер вийшов вручну або за розкладом поки заявка була distributed, не чіпаємо
+    row = q("SELECT exit_reason FROM availability WHERE manager_id=?", (manager_id,), fetch='one')
+    if row and row['exit_reason'] != 'has_distributed':
+        logger.info(
+            f"on_lead_undistributed: {name} ({manager_id}) — не в черзі з іншої причини "
+            f"({row['exit_reason']}), не повертаємо"
+        )
+        return
+
+    set_availability(manager_id, True)
+    logger.info(f"on_lead_undistributed: {name} ({manager_id}) → повернуто в чергу")
+
+    try:
+        await state._app.bot.send_message(
+            chat_id=manager_id,
+            text=(
+                "✅ <b>Вас повернуто в чергу</b>\n\n"
+                "Заявка «Распределены» закрита або передана — "
+                "ви знову отримуватимете нові заявки."
+            ),
+            parse_mode='HTML',
+        )
+    except Exception as e:
+        logger.warning(f"on_lead_undistributed: не вдалось повідомити {manager_id}: {e}")

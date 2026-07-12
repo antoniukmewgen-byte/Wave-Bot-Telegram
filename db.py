@@ -101,6 +101,10 @@ def _create_tables():
                 is_approved INTEGER DEFAULT 0,
                 created_at  REAL
             );
+            CREATE TABLE IF NOT EXISTS distributed_leads (
+                lead_id    TEXT PRIMARY KEY,
+                manager_id TEXT NOT NULL
+            );
         """)
 
 
@@ -406,6 +410,32 @@ def approve_manager(tg_id: str):
 
 def delete_manager(tg_id: str):
     q("DELETE FROM managers WHERE tg_id=?", (tg_id,))
+
+
+# ─── РОЗПОДІЛЕНІ ЗАЯВКИ ──────────────────────────────────────────────────────
+
+def add_distributed_lead(lead_id: str, manager_id: str):
+    """Фіксує що заявка перейшла в 'Распределены' і прив'язана до менеджера."""
+    q("INSERT OR REPLACE INTO distributed_leads (lead_id, manager_id) VALUES (?,?)",
+      (lead_id, manager_id))
+
+
+def remove_distributed_lead(lead_id: str):
+    """Видаляє запис коли заявка покинула статус 'Распределены'."""
+    q("DELETE FROM distributed_leads WHERE lead_id=?", (lead_id,))
+
+
+def get_distributed_lead(lead_id: str) -> Optional[dict]:
+    """Повертає {lead_id, manager_id} якщо заявка зараз у 'Распределены', інакше None."""
+    row = q("SELECT * FROM distributed_leads WHERE lead_id=?", (lead_id,), fetch='one')
+    return dict(row) if row else None
+
+
+def count_distributed_leads(manager_id: str) -> int:
+    """Кількість активних 'Распределены' заявок у менеджера."""
+    row = q("SELECT COUNT(*) as cnt FROM distributed_leads WHERE manager_id=?",
+            (manager_id,), fetch='one')
+    return int(row['cnt']) if row else 0
 
 
 def migrate_managers_from_config(managers_dict: dict, kommo_ids_dict: dict):
