@@ -15,7 +15,7 @@ from config import (
     MAX_LEADS_5, MAX_LEADS_2,
     SHEETS_REFRESH,
 )
-from db import get_manager_by_sheet_name
+from db import get_all_managers
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +108,13 @@ def fetch_managers() -> Dict[str, dict]:
                 except (ValueError, TypeError):
                     return 0
 
+            # Завантажуємо всіх менеджерів одним запитом → O(1) lookup у циклі
+            sheet_name_to_id: Dict[str, str] = {
+                r['sheet_name']: r['tg_id']
+                for r in get_all_managers(approved_only=True)
+                if r['sheet_name']
+            }
+
             result: Dict[str, dict] = {}
             for row in rows[1:]:
                 if len(row) <= COL_CONVERSION:
@@ -118,7 +125,7 @@ def fetch_managers() -> Dict[str, dict]:
                     continue
 
                 name  = row[COL_MANAGER].strip()
-                tg_id = get_manager_by_sheet_name(name)
+                tg_id = sheet_name_to_id.get(name)
                 if not tg_id:
                     continue
 
@@ -187,6 +194,12 @@ def get_block_reason(tg_id: str) -> Optional[str]:
         year_str = str(now_dt.year)
         month_str = MONTHS_UA[now_dt.month]
 
+        sheet_to_id: Dict[str, str] = {
+            r['sheet_name']: r['tg_id']
+            for r in get_all_managers(approved_only=True)
+            if r['sheet_name']
+        }
+
         for row in rows[1:]:
             if len(row) <= COL_CONVERSION:
                 continue
@@ -196,7 +209,7 @@ def get_block_reason(tg_id: str) -> Optional[str]:
                 continue
 
             name = row[COL_MANAGER].strip()
-            if get_manager_by_sheet_name(name) != tg_id:
+            if sheet_to_id.get(name) != tg_id:
                 continue
 
             plan_raw = row[COL_PLAN].strip().replace(' ', '').replace('\xa0', '').replace('$', '').replace(',', '') if len(row) > COL_PLAN else ''

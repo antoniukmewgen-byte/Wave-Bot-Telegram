@@ -44,9 +44,6 @@ async def _handle_manager_status(message, managers: dict):
 
     lines = ["👥 <b>Статус менеджерів:</b>\n"]
     for name, tg_id in get_managers_dict().items():
-        if tg_id == '0':
-            lines.append(f"❌ {name} — ID не вказано")
-            continue
         if tg_id not in managers:
             continue
         if tg_id not in connected_ids:
@@ -82,9 +79,6 @@ async def _handle_connections(message):
     connected = {r['manager_id']: r for r in get_connected()}
     lines = ["🔌 <b>Підключення менеджерів:</b>\n"]
     for name, tg_id in get_managers_dict().items():
-        if tg_id == '0':
-            lines.append(f"❓ {name} — ID не вказано")
-            continue
         if tg_id in connected:
             dt = datetime.fromtimestamp(connected[tg_id]['connected_at'])
             lines.append(f"✅ {name} — підключився {dt.strftime('%d.%m %H:%M')}")
