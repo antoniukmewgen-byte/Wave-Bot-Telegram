@@ -6,10 +6,11 @@ from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 import state
-from config import ADMIN_IDS, MANAGERS, AMO_PIPELINE_ID, AMO_HOT_STATUS_ID, WEBHOOK_PATH, AMO_TOKEN
+from config import ADMIN_IDS, AMO_PIPELINE_ID, AMO_HOT_STATUS_ID, WEBHOOK_PATH, AMO_TOKEN
 from db import (
     q, get_all_taken, get_all_availability, get_all_max_leads_overrides,
-    get_all_exit_reasons, get_connected,
+    get_all_exit_reasons, get_connected, get_managers_dict, get_all_managers,
+    get_pending_managers, approve_manager, delete_manager,
 )
 from kommo import sync_from_kommo
 from notifications import send_long, notify_admin_error
@@ -25,6 +26,7 @@ ADMIN_KB = ReplyKeyboardMarkup(
         [KeyboardButton("📋 Активні заявки"),    KeyboardButton("⚙️ Ліміти")],
         [KeyboardButton("🔄 Синхронізація"),     KeyboardButton("🔌 Підключення")],
         [KeyboardButton("⏰ Розклади"),           KeyboardButton("🔍 Діагностика")],
+        [KeyboardButton("👤 Менеджери")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -41,7 +43,7 @@ async def _handle_manager_status(message, managers: dict):
     exit_reasons  = get_all_exit_reasons()
 
     lines = ["👥 <b>Статус менеджерів:</b>\n"]
-    for name, tg_id in MANAGERS.items():
+    for name, tg_id in get_managers_dict().items():
         if tg_id == '0':
             lines.append(f"❌ {name} — ID не вказано")
             continue
@@ -79,7 +81,7 @@ async def _handle_manager_status(message, managers: dict):
 async def _handle_connections(message):
     connected = {r['manager_id']: r for r in get_connected()}
     lines = ["🔌 <b>Підключення менеджерів:</b>\n"]
-    for name, tg_id in MANAGERS.items():
+    for name, tg_id in get_managers_dict().items():
         if tg_id == '0':
             lines.append(f"❓ {name} — ID не вказано")
             continue
@@ -152,7 +154,7 @@ async def _handle_daily_stats(message):
         mgr_reactions_d[mid].append(reaction_min)
 
     summary_rows = []
-    for mgr_name, tg_id in MANAGERS.items():
+    for mgr_name, tg_id in get_managers_dict().items():
         t = mgr_taken_d.get(tg_id, 0)
         if t == 0:
             continue
@@ -225,7 +227,7 @@ async def _handle_monthly_stats(message):
 
     m_rows      = []
     total_taken = 0
-    for mgr_name, tg_id in MANAGERS.items():
+    for mgr_name, tg_id in get_managers_dict().items():
         t = mgr_taken.get(tg_id, 0)
         if t == 0:
             continue
@@ -335,7 +337,7 @@ async def _handle_diagnostics(message):
         sheets_ok = False
         lines.append(f"  ⚠️ Google Sheets недоступний: {e}")
 
-    for name, tg_id in MANAGERS.items():
+    for name, tg_id in get_managers_dict().items():
         active    = avail_map.get(tg_id, False)
         in_sheet  = tg_id in managers
         taken     = taken_map.get(tg_id, 0)
@@ -398,6 +400,48 @@ async def _handle_sync(message):
         logger.error(f"Sync error: {e}")
 
 
+async def _handle_managers_list(message):
+    """Показує список всіх менеджерів у БД та заявки на схвалення."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    all_mgrs  = get_all_managers(approved_only=False)
+    pending   = [m for m in all_mgrs if not m['is_approved']]
+    approved  = [m for m in all_mgrs if m['is_approved']]
+
+    lines = ["👤 <b>Менеджери в системі</b>\n"]
+
+    if pending:
+        lines.append("⏳ <b>Очікують схвалення:</b>")
+        for m in pending:
+            lines.append(
+                f"  • <b>{m['tg_name']}</b> | Sheets: {m['sheet_name'] or '?'} | "
+                f"Kommo: {m['kommo_id'] or '?'} | ID: <code>{m['tg_id']}</code>"
+            )
+        lines.append("")
+
+    lines.append(f"✅ <b>Схвалені ({len(approved)}):</b>")
+    for m in approved:
+        lines.append(
+            f"  • <b>{m['sheet_name'] or m['tg_name']}</b> | "
+            f"Kommo: {m['kommo_id'] or '?'} | ID: <code>{m['tg_id']}</code>"
+        )
+
+    if pending:
+        buttons = []
+        for m in pending:
+            name = m['sheet_name'] or m['tg_name']
+            buttons.append([
+                InlineKeyboardButton(f"✅ {name}", callback_data=f"mgr_approve:{m['tg_id']}"),
+                InlineKeyboardButton(f"❌ Відхилити", callback_data=f"mgr_reject:{m['tg_id']}"),
+            ])
+        await message.reply_text(
+            '\n'.join(lines), parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+    else:
+        await send_long(message, '\n'.join(lines))
+
+
 async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     if user_id not in ADMIN_IDS:
@@ -422,3 +466,5 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _handle_sync(update.message)
     elif text == "🔍 Діагностика":
         await _handle_diagnostics(update.message)
+    elif text == "👤 Менеджери":
+        await _handle_managers_list(update.message)

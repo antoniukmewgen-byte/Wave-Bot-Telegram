@@ -4,8 +4,8 @@ from datetime import datetime
 
 import aiohttp
 
-from config import AMO_SUBDOMAIN, AMO_TOKEN, AMO_PIPELINE_ID, AMO_HOT_STATUS_ID, HOT_STATUSES, KOMMO_MANAGER_IDS
-from db import q, get_lead
+from config import AMO_SUBDOMAIN, AMO_TOKEN, AMO_PIPELINE_ID, AMO_HOT_STATUS_ID, HOT_STATUSES
+from db import q, get_lead, get_manager
 from notifications import remove_from_others
 
 logger = logging.getLogger(__name__)
@@ -23,9 +23,32 @@ def make_lead_title(status_id: str, lead_id: str) -> str:
     return f'{header}\n🔗 <a href="{lead_url}">Угода #{lead_id}</a>'
 
 
+async def get_kommo_users() -> list:
+    """Повертає список {id, name} з Kommo API для вибору при реєстрації."""
+    if not AMO_TOKEN:
+        return []
+    url     = f"https://{AMO_SUBDOMAIN}.kommo.com/api/v4/users"
+    headers = {"Authorization": f"Bearer {AMO_TOKEN}"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status != 200:
+                    logger.error(f"get_kommo_users: HTTP {resp.status}")
+                    return []
+                data = await resp.json()
+                return [
+                    {'id': u['id'], 'name': u['name']}
+                    for u in data.get('_embedded', {}).get('users', [])
+                ]
+    except Exception as e:
+        logger.error(f"get_kommo_users: {e}")
+        return []
+
+
 async def set_kommo_responsible(lead_id: str, manager_id: str) -> bool:
     """Встановлює відповідального менеджера в Kommo. Повертає True якщо успішно."""
-    kommo_user_id = KOMMO_MANAGER_IDS.get(manager_id)
+    mgr = get_manager(manager_id)
+    kommo_user_id = mgr['kommo_id'] if mgr else None
     if not kommo_user_id or not AMO_TOKEN:
         return False
     url     = f"https://{AMO_SUBDOMAIN}.kommo.com/api/v4/leads"

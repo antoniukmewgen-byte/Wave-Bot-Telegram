@@ -5,8 +5,11 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes, ConversationHandler
 
 import state
-from config import ADMIN_IDS, MANAGERS
-from db import get_all_max_leads_overrides, get_all_schedules, set_max_leads_override, set_schedule
+from config import ADMIN_IDS
+from db import (
+    get_all_max_leads_overrides, get_all_schedules, set_max_leads_override, set_schedule,
+    get_managers_dict, upsert_manager, get_manager, get_all_managers,
+)
 from sheets import fetch_managers
 
 logger = logging.getLogger(__name__)
@@ -14,6 +17,8 @@ logger = logging.getLogger(__name__)
 LIMIT_SELECT, LIMIT_INPUT = range(2)
 
 SCHED_SELECT, SCHED_DAYS, SCHED_TIME, SCHED_END_TIME = range(4)
+
+REG_SELECT_SHEET, REG_SELECT_KOMMO = range(2)
 
 DAYS_UA = {0: 'Пн', 1: 'Вт', 2: 'Ср', 3: 'Чт', 4: 'Пт', 5: 'Сб', 6: 'Нд'}
 
@@ -131,7 +136,7 @@ async def schedules_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     schedules = get_all_schedules()
     buttons   = []
-    for name, tg_id in sorted(MANAGERS.items(), key=lambda x: x[0]):
+    for name, tg_id in sorted(get_managers_dict().items(), key=lambda x: x[0]):
         sch = schedules.get(tg_id)
         sch_text = _format_schedule(sch) if sch else '—'
         buttons.append([InlineKeyboardButton(
@@ -273,3 +278,156 @@ async def schedules_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from handlers.admin import ADMIN_KB
     await update.message.reply_text("❌ Скасовано", reply_markup=ADMIN_KB)
     return ConversationHandler.END
+
+
+# ─── CONVERSATION: РЕЄСТРАЦІЯ МЕНЕДЖЕРА ──────────────────────────────────────
+
+async def reg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Крок 1 — вибір імені зі Sheets."""
+    query = update.callback_query
+    await query.answer()
+
+    tg_id = str(query.from_user.id)
+
+    # Якщо вже в системі
+    existing = get_manager(tg_id)
+    if existing:
+        if existing['is_approved']:
+            await query.edit_message_text("✅ Ви вже зареєстровані в системі.")
+        else:
+            await query.edit_message_text(
+                "⏳ Ваша заявка вже відправлена та очікує схвалення адміністратором."
+            )
+        return ConversationHandler.END
+
+    # Список імен з Google Sheets (тільки ті, кого немає в БД)
+    try:
+        sheet_data = fetch_managers()
+        registered_sheet_names = {
+            r['sheet_name'] for r in get_all_managers(approved_only=False)
+            if r['sheet_name']
+        }
+        available_names = [
+            info['name'] for tg, info in sheet_data.items()
+            if info['name'] not in registered_sheet_names
+        ]
+    except Exception as e:
+        logger.error(f"reg_start: не вдалось отримати список з Sheets: {e}")
+        await query.edit_message_text("❌ Помилка завантаження списку. Спробуйте пізніше.")
+        return ConversationHandler.END
+
+    if not available_names:
+        await query.edit_message_text(
+            "❌ Не знайдено вільних імен у таблиці.\n"
+            "Зверніться до адміністратора."
+        )
+        return ConversationHandler.END
+
+    buttons = [
+        [InlineKeyboardButton(name, callback_data=f"reg_sheet:{name}")]
+        for name in sorted(available_names)
+    ]
+    await query.edit_message_text(
+        "📝 <b>Реєстрація</b>\n\nОберіть своє ім'я зі списку менеджерів:",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+    return REG_SELECT_SHEET
+
+
+async def reg_select_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Крок 2 — вибір акаунту в Kommo."""
+    query      = update.callback_query
+    await query.answer()
+    sheet_name = query.data.split(':', 1)[1]
+    tg_id      = str(query.from_user.id)
+
+    context.user_data['reg_sheet_name'] = sheet_name
+
+    # Отримуємо список користувачів Kommo
+    from kommo import get_kommo_users
+    try:
+        kommo_users = await get_kommo_users()
+    except Exception as e:
+        logger.error(f"reg_select_sheet: {e}")
+        kommo_users = []
+
+    if not kommo_users:
+        # Якщо Kommo API недоступний — зберігаємо без kommo_id і відправляємо на схвалення
+        await _submit_registration(query, tg_id, sheet_name, kommo_id=None)
+        return ConversationHandler.END
+
+    buttons = [
+        [InlineKeyboardButton(u['name'], callback_data=f"reg_kommo:{u['id']}:{u['name']}")]
+        for u in kommo_users
+    ]
+    buttons.append([InlineKeyboardButton("⏭ Пропустити", callback_data="reg_kommo:0:—")])
+
+    await query.edit_message_text(
+        f"📝 Ім'я в таблиці: <b>{sheet_name}</b>\n\n"
+        "Оберіть свій акаунт у Kommo CRM:",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+    return REG_SELECT_KOMMO
+
+
+async def reg_select_kommo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Крок 3 — збереження та відправка на схвалення."""
+    query      = update.callback_query
+    await query.answer()
+    tg_id      = str(query.from_user.id)
+    sheet_name = context.user_data.get('reg_sheet_name', '')
+
+    parts     = query.data.split(':', 2)
+    kommo_id  = int(parts[1]) if parts[1] != '0' else None
+    kommo_name = parts[2] if len(parts) > 2 else '—'
+
+    context.user_data['reg_kommo_id']   = kommo_id
+    context.user_data['reg_kommo_name'] = kommo_name
+
+    await _submit_registration(query, tg_id, sheet_name, kommo_id)
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def _submit_registration(query, tg_id: str, sheet_name: str, kommo_id):
+    """Зберігає заявку і повідомляє адмінів."""
+    from notifications import notify_admins
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    tg_name = query.from_user.full_name
+
+    upsert_manager(tg_id, tg_name, sheet_name, kommo_id)
+
+    await query.edit_message_text(
+        f"✅ <b>Заявку відправлено!</b>\n\n"
+        f"👤 Ім'я в таблиці: <b>{sheet_name}</b>\n"
+        f"🔗 Kommo: <b>{kommo_id or '—'}</b>\n\n"
+        f"Очікуйте схвалення від адміністратора. Ви отримаєте повідомлення.",
+        parse_mode='HTML',
+    )
+
+    approval_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Схвалити", callback_data=f"mgr_approve:{tg_id}"),
+        InlineKeyboardButton("❌ Відхилити", callback_data=f"mgr_reject:{tg_id}"),
+    ]])
+    await notify_admins(
+        f"📝 <b>Новий запит на реєстрацію</b>\n\n"
+        f"👤 Telegram: <b>{tg_name}</b> (<code>{tg_id}</code>)\n"
+        f"📋 Sheets: <b>{sheet_name}</b>\n"
+        f"🔗 Kommo ID: <b>{kommo_id or '—'}</b>",
+    )
+    # Відправляємо кнопки схвалення окремим повідомленням кожному адміну
+    import state as _state
+    from config import ADMIN_IDS
+    for admin_id in ADMIN_IDS:
+        try:
+            await _state._app.bot.send_message(
+                chat_id=admin_id,
+                text=f"Схвалити реєстрацію <b>{tg_name}</b> ({sheet_name})?",
+                reply_markup=approval_kb,
+                parse_mode='HTML',
+            )
+        except Exception as e:
+            logger.warning(f"_submit_registration: не вдалось надіслати адміну {admin_id}: {e}")

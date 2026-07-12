@@ -12,8 +12,8 @@ from telegram.ext import (
 )
 
 import state
-from config import BOT_TOKEN, MANAGERS, WEBHOOK_PATH, AMO_PIPELINE_ID, AMO_HOT_STATUS_ID
-from db import init_db, q, get_lead, init_default_schedules
+from config import BOT_TOKEN, MANAGERS, KOMMO_MANAGER_IDS, WEBHOOK_PATH, AMO_PIPELINE_ID, AMO_HOT_STATUS_ID
+from db import init_db, q, get_lead, init_default_schedules, migrate_managers_from_config, get_managers_dict
 from kommo import make_lead_title
 from notifications import notify_admin_error, remove_from_others, schedule_cleanup
 from queue_logic import assign_next, scheduler_loop, deactivate_out_of_schedule
@@ -25,7 +25,10 @@ from handlers.conversations import (
     LIMIT_SELECT, LIMIT_INPUT, limits_start, limits_select, limits_input, limits_cancel,
     SCHED_SELECT, SCHED_DAYS, SCHED_TIME, SCHED_END_TIME,
     schedules_start, schedules_select, schedules_days, schedules_time, schedules_end_time, schedules_cancel,
+    REG_SELECT_SHEET, REG_SELECT_KOMMO,
+    reg_start, reg_select_sheet, reg_select_kommo,
 )
+from handlers.admin_callbacks import on_admin_callback
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)s %(name)s: %(message)s',
@@ -37,7 +40,9 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(fastapi: FastAPI):
     init_db()
-    init_default_schedules(MANAGERS)
+    migrate_managers_from_config(MANAGERS, KOMMO_MANAGER_IDS)
+    state.reload_managers()
+    init_default_schedules(get_managers_dict())
 
     state._app = (
         Application.builder()
@@ -51,6 +56,22 @@ async def lifespan(fastapi: FastAPI):
         .build()
     )
     app = state._app
+
+    # ── Реєстрація менеджерів ────────────────────────────────────────────────
+    _reg_entry = CallbackQueryHandler(reg_start, pattern=r'^reg:start$')
+    app.add_handler(ConversationHandler(
+        entry_points=[_reg_entry],
+        states={
+            REG_SELECT_SHEET: [CallbackQueryHandler(reg_select_sheet, pattern=r'^reg_sheet:')],
+            REG_SELECT_KOMMO: [CallbackQueryHandler(reg_select_kommo, pattern=r'^reg_kommo:')],
+        },
+        fallbacks=[CommandHandler('start', on_start)],
+        per_user=True,
+        allow_reentry=True,
+    ))
+
+    # ── Адміністративні колбеки (схвалення менеджерів тощо) ─────────────────
+    app.add_handler(CallbackQueryHandler(on_admin_callback, pattern=r'^mgr_(approve|reject):'))
 
     _lim_entry = MessageHandler(filters.TEXT & filters.Regex(r'^⚙️ Ліміти$'), limits_start)
     app.add_handler(ConversationHandler(
@@ -90,7 +111,7 @@ async def lifespan(fastapi: FastAPI):
         filters.TEXT & filters.Regex(
             r'^(👥 Статус менеджерів|📊 Черга|🔌 Підключення|📋 Активні заявки'
             r'|📅 Статистика день|📆 Статистика місяць|🔄 Синхронізація'
-            r'|⏰ Розклади|🔍 Діагностика)$'
+            r'|⏰ Розклади|🔍 Діагностика|👤 Менеджери)$'
         ),
         on_admin_button,
     ))

@@ -7,7 +7,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from config import (
-    SHEETS_ID, SHEET_NAME, GOOGLE_CREDS, MANAGERS,
+    SHEETS_ID, SHEET_NAME, GOOGLE_CREDS,
     COL_MANAGER, COL_YEAR, COL_MONTH, COL_PLAN, COL_CONVERSION,
     COL_PAYMENTS, COL_HOT_TAKEN,
     CONV_UNLIMITED, CONV_MAX5_MIN, CONV_MAX2_MIN,
@@ -15,6 +15,7 @@ from config import (
     MAX_LEADS_5, MAX_LEADS_2,
     SHEETS_REFRESH,
 )
+from db import get_manager_by_sheet_name
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +118,7 @@ def fetch_managers() -> Dict[str, dict]:
                     continue
 
                 name  = row[COL_MANAGER].strip()
-                tg_id = MANAGERS.get(name)
+                tg_id = get_manager_by_sheet_name(name)
                 if not tg_id:
                     continue
 
@@ -195,7 +196,7 @@ def get_block_reason(tg_id: str) -> Optional[str]:
                 continue
 
             name = row[COL_MANAGER].strip()
-            if MANAGERS.get(name) != tg_id:
+            if get_manager_by_sheet_name(name) != tg_id:
                 continue
 
             plan_raw = row[COL_PLAN].strip().replace(' ', '').replace('\xa0', '').replace('$', '').replace(',', '') if len(row) > COL_PLAN else ''

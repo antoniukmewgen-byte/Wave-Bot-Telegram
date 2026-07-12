@@ -6,11 +6,11 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 import state
-from config import ADMIN_IDS, MANAGERS
+from config import ADMIN_IDS
 from db import (
     q, get_lead, get_taken, get_all_max_leads_overrides,
     is_available, set_availability, mark_connected, mark_skipped, get_skipped, take_lead,
-    get_last_connected_ts,
+    get_last_connected_ts, get_manager,
 )
 from kommo import set_kommo_responsible
 from notifications import notify_admins, notify_admin_error, edit_msg, remove_from_others, schedule_cleanup, schedule_delete_msg, remove_buttons_for_manager
@@ -37,10 +37,27 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.full_name
 
     is_admin   = user_id in ADMIN_IDS
-    is_manager = user_id in MANAGERS.values()
+    mgr_row    = get_manager(user_id)
+    is_manager = mgr_row is not None and bool(mgr_row.get('is_approved'))
 
     if not is_admin and not is_manager:
-        await update.message.reply_text("⛔ У вас немає доступу до цього бота.")
+        if mgr_row and not mgr_row.get('is_approved'):
+            # Заявка на реєстрацію ще очікує схвалення
+            await update.message.reply_text(
+                "⏳ Ваша заявка на реєстрацію очікує схвалення адміністратором.\n"
+                "Ви отримаєте повідомлення після перевірки."
+            )
+        else:
+            # Незнайомий користувач — пропонуємо реєстрацію
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("📝 Зареєструватись", callback_data="reg:start")
+            ]])
+            await update.message.reply_text(
+                "⛔ У вас немає доступу до цього бота.\n\n"
+                "Якщо ви менеджер — зареєструйтесь:",
+                reply_markup=kb,
+            )
         return
 
     from handlers.admin import ADMIN_KB

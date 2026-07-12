@@ -5,7 +5,7 @@ from telegram.error import Forbidden, RetryAfter, TimedOut, NetworkError
 
 import state
 from config import ADMIN_IDS
-from db import q, get_msg_id, save_msg, get_all_msgs, set_availability
+from db import q, get_msg_id, save_msg, get_all_msgs, set_availability, delete_manager
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +52,16 @@ async def notify_admin_error(where: str, error: Exception, manager_id: str = Non
 
 
 async def _deactivate_blocked(manager_id: str):
-    set_availability(manager_id, False, reason='bot_blocked')
     name = state.MANAGERS_BY_ID.get(manager_id, manager_id)
-    logger.warning(f"{name} ({manager_id}) заблокував бота — деактивовано")
-    await notify_admins(f"🔕 <b>{name}</b> заблокував бота — автоматично виведено з черги")
+    delete_manager(manager_id)
+    set_availability(manager_id, False, reason='bot_blocked')
+    # Видаляємо з MANAGERS_BY_ID щоб назва не залишалась у пам'яті
+    state.MANAGERS_BY_ID.pop(manager_id, None)
+    logger.warning(f"{name} ({manager_id}) заблокував бота — видалено з бота")
+    await notify_admins(
+        f"🔕 <b>{name}</b> заблокував бота — видалено з системи.\n"
+        f"Для повернення в роботу менеджер має знову пройти реєстрацію (/start)."
+    )
 
 
 async def _tg_retry(coro_fn, manager_id: str):

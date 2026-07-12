@@ -93,6 +93,14 @@ def _create_tables():
                 enabled        INTEGER DEFAULT 1,
                 last_notified  TEXT
             );
+            CREATE TABLE IF NOT EXISTS managers (
+                tg_id       TEXT PRIMARY KEY,
+                tg_name     TEXT,
+                sheet_name  TEXT,
+                kommo_id    INTEGER,
+                is_approved INTEGER DEFAULT 0,
+                created_at  REAL
+            );
         """)
 
 
@@ -348,3 +356,74 @@ def init_default_schedules(managers_map: dict):
                 "INSERT OR IGNORE INTO schedules (manager_id, days, start_time, end_time) VALUES (?,?,?,?)",
                 (tg_id, days, start_time, end_time),
             )
+
+
+# ─── МЕНЕДЖЕРИ ───────────────────────────────────────────────────────────────
+
+def get_manager(tg_id: str) -> Optional[dict]:
+    row = q("SELECT * FROM managers WHERE tg_id=?", (tg_id,), fetch='one')
+    return dict(row) if row else None
+
+
+def get_manager_by_sheet_name(sheet_name: str) -> Optional[str]:
+    """Повертає tg_id менеджера за іменем у Google Sheets, або None."""
+    row = q("SELECT tg_id FROM managers WHERE sheet_name=? AND is_approved=1",
+            (sheet_name,), fetch='one')
+    return row['tg_id'] if row else None
+
+
+def get_all_managers(approved_only: bool = False) -> list:
+    if approved_only:
+        rows = q("SELECT * FROM managers WHERE is_approved=1 ORDER BY sheet_name", fetch='all')
+    else:
+        rows = q("SELECT * FROM managers ORDER BY created_at", fetch='all')
+    return [dict(r) for r in rows] if rows else []
+
+
+def get_managers_dict() -> dict:
+    """Повертає {sheet_name: tg_id} для всіх схвалених менеджерів."""
+    rows = get_all_managers(approved_only=True)
+    return {r['sheet_name']: r['tg_id'] for r in rows if r['sheet_name']}
+
+
+def get_pending_managers() -> list:
+    rows = q("SELECT * FROM managers WHERE is_approved=0 ORDER BY created_at", fetch='all')
+    return [dict(r) for r in rows] if rows else []
+
+
+def upsert_manager(tg_id: str, tg_name: str, sheet_name: str = None, kommo_id: int = None):
+    """Створює або оновлює запис менеджера (не схвалений)."""
+    ts = datetime.now().timestamp()
+    q("""INSERT INTO managers (tg_id, tg_name, sheet_name, kommo_id, is_approved, created_at)
+         VALUES (?, ?, ?, ?, 0, ?)
+         ON CONFLICT(tg_id) DO UPDATE SET tg_name=?, sheet_name=?, kommo_id=?""",
+      (tg_id, tg_name, sheet_name, kommo_id, ts, tg_name, sheet_name, kommo_id))
+
+
+def approve_manager(tg_id: str):
+    q("UPDATE managers SET is_approved=1 WHERE tg_id=?", (tg_id,))
+
+
+def delete_manager(tg_id: str):
+    q("DELETE FROM managers WHERE tg_id=?", (tg_id,))
+
+
+def migrate_managers_from_config(managers_dict: dict, kommo_ids_dict: dict):
+    """
+    Переносить хардкоджених менеджерів з config.py у таблицю managers.
+    Ідемпотентна — пропускає вже існуючих.
+    """
+    ts = datetime.now().timestamp()
+    count = 0
+    with sqlite3.connect(DB_PATH) as c:
+        for sheet_name, tg_id in managers_dict.items():
+            c.execute(
+                """INSERT OR IGNORE INTO managers
+                   (tg_id, tg_name, sheet_name, kommo_id, is_approved, created_at)
+                   VALUES (?, ?, ?, ?, 1, ?)""",
+                (tg_id, sheet_name, sheet_name, kommo_ids_dict.get(tg_id), ts),
+            )
+            if c.execute("SELECT changes()").fetchone()[0]:
+                count += 1
+    if count:
+        logger.info(f"migrate_managers_from_config: додано {count} менеджерів")
