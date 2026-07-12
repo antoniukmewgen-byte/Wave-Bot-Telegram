@@ -12,8 +12,8 @@ from telegram.ext import (
 )
 
 import state
-from config import BOT_TOKEN, MANAGERS, KOMMO_MANAGER_IDS, WEBHOOK_PATH, AMO_PIPELINE_ID, AMO_HOT_STATUS_ID
-from db import init_db, q, get_lead, init_default_schedules, migrate_managers_from_config, get_managers_dict
+from config import BOT_TOKEN, WEBHOOK_PATH, AMO_PIPELINE_ID, AMO_HOT_STATUS_ID
+from db import init_db, q, get_lead, init_default_schedules, get_managers_dict
 from kommo import make_lead_title
 from notifications import notify_admin_error, remove_from_others, schedule_cleanup
 from queue_logic import assign_next, scheduler_loop, deactivate_out_of_schedule
@@ -40,7 +40,6 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(fastapi: FastAPI):
     init_db()
-    migrate_managers_from_config(MANAGERS, KOMMO_MANAGER_IDS)
     state.reload_managers()
     init_default_schedules(get_managers_dict())
 
