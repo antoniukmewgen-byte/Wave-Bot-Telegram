@@ -163,6 +163,26 @@ async def lifespan(fastapi: FastAPI):
 fastapi_app = FastAPI(lifespan=lifespan)
 
 
+def _extract_lead_events(data) -> list[dict]:
+    """
+    Парсить форму вебхука Kommo. Kommo може пакувати кілька змін лідів
+    в один HTTP-запит (leads[status][0], leads[status][1], ...) — тому
+    треба зчитувати ВСІ індекси, а не тільки [0].
+    """
+    events = []
+    for category in ('status', 'add', 'delete'):
+        idx = 0
+        while f'leads[{category}][{idx}][id]' in data:
+            events.append({
+                'lead_id':     data.get(f'leads[{category}][{idx}][id]'),
+                'status_id':   data.get(f'leads[{category}][{idx}][status_id]'),
+                'pipeline_id': data.get(f'leads[{category}][{idx}][pipeline_id]'),
+                'is_delete':   category == 'delete',
+            })
+            idx += 1
+    return events
+
+
 @fastapi_app.post(f'/webhook/{WEBHOOK_PATH}')
 async def amocrm_webhook(request: Request):
     try:
@@ -170,27 +190,33 @@ async def amocrm_webhook(request: Request):
     except Exception:
         return {'ok': True}
 
-    lead_id     = (data.get('leads[status][0][id]')
-                   or data.get('leads[add][0][id]')
-                   or data.get('leads[delete][0][id]'))
-    status_id   = (data.get('leads[status][0][status_id]')
-                   or data.get('leads[add][0][status_id]'))
-    pipeline_id = (data.get('leads[status][0][pipeline_id]')
-                   or data.get('leads[add][0][pipeline_id]'))
-    is_delete   = bool(data.get('leads[delete][0][id]'))
+    events = _extract_lead_events(data)
+    logger.info(f"Webhook: {len(events)} подій, keys={list(data.keys())}")
+
+    for event in events:
+        await _handle_lead_event(event)
+
+    return {'ok': True}
+
+
+async def _handle_lead_event(event: dict):
+    lead_id     = event['lead_id']
+    status_id   = event['status_id']
+    pipeline_id = event['pipeline_id']
+    is_delete   = event['is_delete']
 
     logger.info(
         f"Webhook: lead_id={lead_id} status_id={status_id} "
-        f"pipeline_id={pipeline_id} delete={is_delete} keys={list(data.keys())[:6]}"
+        f"pipeline_id={pipeline_id} delete={is_delete}"
     )
 
     if not lead_id:
-        return {'ok': True}
+        return
 
     # Базова валідація: lead_id має бути числовим рядком
     if not str(lead_id).strip().isdigit():
         logger.warning(f"Webhook: невалідний lead_id={lead_id!r} — ігноруємо")
-        return {'ok': True}
+        return
     lead_id = str(lead_id).strip()
 
     if is_delete:
@@ -200,14 +226,14 @@ async def amocrm_webhook(request: Request):
             await remove_from_others(lead_id, note="🗑 Заявку видалено в CRM")
             schedule_cleanup(lead_id)
             logger.info(f"Webhook: заявка {lead_id} видалена в CRM → закрито в боті")
-        return {'ok': True}
+        return
 
     # ── Заявка перейшла в статус "Распределены" ─────────────────────────────
     if (str(pipeline_id) == AMO_DISTRIBUTED_PIPELINE_ID
             and str(status_id) == AMO_DISTRIBUTED_STATUS_ID):
         logger.info(f"Webhook: заявка {lead_id} → 'Распределены'")
         asyncio.create_task(on_lead_distributed(lead_id))
-        return {'ok': True}
+        return
 
     # ── Заявка покинула статус "Распределены" ───────────────────────────────
     distributed_row = get_distributed_lead(lead_id)
@@ -228,7 +254,7 @@ async def amocrm_webhook(request: Request):
             logger.info(f"Webhook: заявка {lead_id} пішла в іншу воронку → закрито в боті")
         else:
             logger.info(f"Webhook: ігноруємо pipeline_id={pipeline_id} (не наша воронка)")
-        return {'ok': True}
+        return
 
     if str(status_id) != AMO_HOT_STATUS_ID:
         lead = get_lead(lead_id)
@@ -237,10 +263,10 @@ async def amocrm_webhook(request: Request):
             await remove_from_others(lead_id, note="📋 Заявку переміщено на інший етап в CRM")
             schedule_cleanup(lead_id)
             logger.info(f"Webhook: заявка {lead_id} змінила статус → закрито в боті")
-        return {'ok': True}
+        return
 
     if get_lead(lead_id):
-        return {'ok': True}
+        return
 
     title = make_lead_title(status_id, lead_id)
 
@@ -261,10 +287,9 @@ async def amocrm_webhook(request: Request):
     if last_err:
         logger.error(f"Webhook: не вдалось записати заявку {lead_id} після 3 спроб: {last_err}")
         await notify_admin_error(f"webhook (запис заявки #{lead_id} в БД, 3 спроби)", last_err)
-        return {'ok': False}
+        return
 
     asyncio.create_task(assign_next(lead_id))
-    return {'ok': True}
 
 
 if __name__ == '__main__':
