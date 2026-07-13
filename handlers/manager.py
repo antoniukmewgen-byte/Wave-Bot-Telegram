@@ -10,7 +10,7 @@ from config import ADMIN_IDS
 from db import (
     q, get_lead, get_taken, get_all_max_leads_overrides,
     is_available, set_availability, mark_connected, mark_skipped, get_skipped, take_lead,
-    get_last_connected_ts, get_manager,
+    get_last_connected_ts, get_manager, clear_distributed_leads,
 )
 from kommo import set_kommo_responsible
 from notifications import notify_admins, notify_admin_error, edit_msg, remove_from_others, schedule_cleanup, schedule_delete_msg, remove_buttons_for_manager
@@ -119,6 +119,8 @@ async def on_work_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     set_availability(user_id, active, reason=None if active else 'manual')
+    if not active:
+        clear_distributed_leads(user_id)
     status = "✅ Ви в черзі — заявки надходитимуть" if active else "🚫 Ви вийшли з черги — заявки не надходитимуть"
     await update.message.reply_text(status, reply_markup=MANAGER_KB)
     if active:
@@ -152,6 +154,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             active = (lead_id == 'on')
             set_availability(manager_id, active, reason=None if active else 'manual')
+            if not active:
+                clear_distributed_leads(manager_id)
             await query.answer()
             status = "✅ Ви в черзі — заявки надходитимуть" if active else "🚫 Ви вийшли з черги — заявки не надходитимуть"
             await query.edit_message_text(
