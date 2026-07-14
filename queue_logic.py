@@ -15,7 +15,8 @@ from db import (
     get_skipped, get_all_schedules, update_last_notified, reset_all_limit_overrides, get_msg_id,
     get_all_msgs, claim_lead_for_send, delete_msg, is_available, set_availability,
     get_all_managers, get_manager, get_exit_reason,
-    add_distributed_lead, remove_distributed_lead, count_distributed_leads,
+    add_distributed_lead, remove_distributed_lead, count_distributed_leads, get_distributed_lead,
+    transfer_taken,
 )
 from notifications import (
     notify_admins, notify_admin_error, send_to, edit_msg, delete_and_send, remove_from_others,
@@ -646,8 +647,10 @@ async def scheduler_loop():
 
 async def on_lead_distributed(lead_id: str):
     """
-    Викликається коли заявка переходить в статус 'Распределены'.
-    Визначає відповідального менеджера і виводить його з черги.
+    Викликається коли заявка переходить в статус 'Распределены', а також коли
+    в цьому статусі просто змінюють відповідального (Kommo шле ту саму
+    вебхук-подію 'status' і на зміну responsible_user_id, без зміни стадії) —
+    тому тут завжди перевіряємо ПОТОЧНОГО відповідального, а не тільки перший раз.
     """
     from kommo import get_lead_responsible
 
@@ -661,6 +664,15 @@ async def on_lead_distributed(lead_id: str):
          if m['kommo_id'] == responsible_kommo_id),
         None,
     )
+    new_manager_id = mgr['tg_id'] if mgr else None
+
+    # Лід вже був закріплений за кимось раніше — перевіряємо, чи це той самий
+    existing = get_distributed_lead(lead_id)
+    if existing and existing['manager_id'] != new_manager_id:
+        # Відповідального змінили, поки лід лишався в 'Распределены' —
+        # звільняємо старого менеджера (і переносимо йому лічильник взятого)
+        await _release_reassigned_manager(lead_id, existing['manager_id'], new_manager_id)
+
     if not mgr:
         logger.info(
             f"on_lead_distributed: менеджер з kommo_id={responsible_kommo_id} "
@@ -668,7 +680,11 @@ async def on_lead_distributed(lead_id: str):
         )
         return
 
-    manager_id = mgr['tg_id']
+    if existing and existing['manager_id'] == new_manager_id:
+        # Той самий менеджер, як і був — нічого по суті не змінилось
+        return
+
+    manager_id = new_manager_id
     name       = mgr['sheet_name'] or mgr['tg_name'] or manager_id
 
     add_distributed_lead(lead_id, manager_id)
@@ -692,6 +708,56 @@ async def on_lead_distributed(lead_id: str):
         )
     except Exception as e:
         logger.warning(f"on_lead_distributed: не вдалось повідомити {manager_id}: {e}")
+
+
+async def _release_reassigned_manager(lead_id: str, old_manager_id: str, new_manager_id=None):
+    """
+    Лід був закріплений за old_manager_id, але зараз в Kommo відповідальний
+    інший (new_manager_id, або взагалі не наш менеджер — тоді None).
+    Прибираємо стару прив'язку, переносимо лічильник «взятих» заявок і,
+    якщо у старого менеджера більше немає інших розподілених лідів,
+    повертаємо його в чергу (тільки якщо exit_reason саме 'has_distributed').
+    """
+    remove_distributed_lead(lead_id)
+    transfer_taken(old_manager_id, new_manager_id, day_key())
+
+    remaining = count_distributed_leads(old_manager_id)
+    if remaining > 0:
+        logger.info(
+            f"on_lead_distributed (переприз.): {old_manager_id} ще має {remaining} заявок у 'Распределены'"
+        )
+        return
+
+    mgr = get_manager(old_manager_id)
+    if not mgr:
+        return
+    name = mgr['sheet_name'] or mgr['tg_name'] or old_manager_id
+
+    row = q("SELECT exit_reason FROM availability WHERE manager_id=?", (old_manager_id,), fetch='one')
+    if row and row['exit_reason'] != 'has_distributed':
+        logger.info(
+            f"on_lead_distributed (переприз.): {name} ({old_manager_id}) — не в черзі з іншої причини "
+            f"({row['exit_reason']}), не повертаємо"
+        )
+        return
+
+    set_availability(old_manager_id, True)
+    logger.info(
+        f"on_lead_distributed (переприз.): {name} ({old_manager_id}) → "
+        f"заявку {lead_id} передано іншому, повернуто в чергу"
+    )
+
+    try:
+        await state._app.bot.send_message(
+            chat_id=old_manager_id,
+            text=(
+                "↩️ <b>Заявку передано іншому менеджеру</b>\n\n"
+                "Ця заявка більше не за вами — ви повернуті в чергу."
+            ),
+            parse_mode='HTML',
+        )
+    except Exception as e:
+        logger.warning(f"on_lead_distributed (переприз.): не вдалось повідомити {old_manager_id}: {e}")
 
 
 async def on_lead_undistributed(lead_id: str, manager_id: str):

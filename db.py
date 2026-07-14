@@ -188,6 +188,21 @@ def inc_taken(manager_id: str, month: str):
       (manager_id, month))
 
 
+def transfer_taken(old_manager_id: str, new_manager_id: Optional[str], day: str):
+    """
+    Переносить облік «взятої» заявки з одного менеджера на іншого — коли
+    в Kommo змінили відповідального, поки лід лишався в 'Распределены'.
+    Зменшує лічильник старому (не нижче 0); якщо новий відповідальний теж
+    наш менеджер — збільшує йому, ніби це він щойно взяв заявку.
+    """
+    q("UPDATE stats SET taken = MAX(taken - 1, 0) WHERE manager_id=? AND month=?",
+      (old_manager_id, day))
+    if new_manager_id:
+        q("""INSERT INTO stats (manager_id, month, taken) VALUES (?,?,1)
+             ON CONFLICT(manager_id, month) DO UPDATE SET taken = taken + 1""",
+          (new_manager_id, day))
+
+
 def claim_lead_for_send(lead_id: str, manager_id: str) -> bool:
     """Атомарно «бронює» заявку для надсилання. Повертає True якщо заброньовано цим менеджером."""
     conn = _get_conn()

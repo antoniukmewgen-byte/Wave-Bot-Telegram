@@ -170,7 +170,7 @@ def _extract_lead_events(data) -> list[dict]:
     треба зчитувати ВСІ індекси, а не тільки [0].
     """
     events = []
-    for category in ('status', 'add', 'delete'):
+    for category in ('status', 'add', 'delete', 'responsible'):
         idx = 0
         while f'leads[{category}][{idx}][id]' in data:
             events.append({
@@ -178,6 +178,7 @@ def _extract_lead_events(data) -> list[dict]:
                 'status_id':   data.get(f'leads[{category}][{idx}][status_id]'),
                 'pipeline_id': data.get(f'leads[{category}][{idx}][pipeline_id]'),
                 'is_delete':   category == 'delete',
+                'category':    category,
             })
             idx += 1
     return events
@@ -218,6 +219,16 @@ async def _handle_lead_event(event: dict):
         logger.warning(f"Webhook: невалідний lead_id={lead_id!r} — ігноруємо")
         return
     lead_id = str(lead_id).strip()
+
+    # ── Змінили тільки відповідального (окрема категорія вебхука Kommo) ────
+    # Не чіпаємо загальну логіку створення/закриття лідів — цікавить нас лише
+    # випадок, коли лід лишається в 'Распределены', а власника переставили.
+    if event.get('category') == 'responsible':
+        if (str(pipeline_id) == AMO_DISTRIBUTED_PIPELINE_ID
+                and str(status_id) == AMO_DISTRIBUTED_STATUS_ID):
+            logger.info(f"Webhook: заявка {lead_id} — змінили відповідального (лишається в 'Распределены')")
+            asyncio.create_task(on_lead_distributed(lead_id))
+        return
 
     if is_delete:
         lead = get_lead(lead_id)
