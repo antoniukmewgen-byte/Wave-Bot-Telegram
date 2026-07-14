@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, Request
-from telegram import BotCommand, MenuButtonCommands, Update
+from telegram import BotCommand, BotCommandScopeAllGroupChats, MenuButtonCommands, Update
 from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application, CallbackQueryHandler, CommandHandler,
@@ -127,6 +127,13 @@ async def lifespan(fastapi: FastAPI):
     await app.initialize()
     await app.start()
     await app.bot.set_my_commands([BotCommand('start', '🔄 Головне меню / перезапуск')])
+    await app.bot.set_my_commands(
+        [
+            BotCommand('statuson', '✅ Увімкнути розсилку статусу менеджерів (17:00-22:00)'),
+            BotCommand('statusoff', '🔕 Вимкнути розсилку статусу менеджерів'),
+        ],
+        scope=BotCommandScopeAllGroupChats(),
+    )
     await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
     loop = asyncio.get_event_loop()
