@@ -142,6 +142,26 @@ async def remove_buttons_for_manager(manager_id: str):
         await edit_msg(manager_id, lead['lead_id'], f"⏸ Ви вийшли з черги\n\n{lead['title']}")
 
 
+async def delete_messages_for_manager(manager_id: str):
+    """
+    При виході з черги (вручну або автоматично за розкладом) — видаляє в Telegram
+    усі активні повідомлення менеджера (як особисті, так і broadcast) і чистить БД,
+    щоб вони не залишались "привидами" й не заважали при поверненні в чергу.
+    """
+    rows = q("""
+        SELECT m.lead_id, m.msg_id FROM messages m
+        JOIN leads l ON l.lead_id = m.lead_id
+        WHERE m.manager_id = ?
+          AND l.status NOT IN ('taken', 'duplicate', 'closed')
+    """, (manager_id,), fetch='all')
+    for row in (rows or []):
+        try:
+            await state._app.bot.delete_message(chat_id=manager_id, message_id=row['msg_id'])
+        except Exception as e:
+            logger.debug(f"delete_messages_for_manager: не вдалось видалити {row['msg_id']} для {manager_id}: {e}")
+        q("DELETE FROM messages WHERE lead_id=? AND manager_id=?", (row['lead_id'], manager_id))
+
+
 async def remove_from_others(lead_id: str, except_id: str = None, note: str = "✅ Заявку вже взято в роботу"):
     for m in get_all_msgs(lead_id):
         if m['manager_id'] == except_id:

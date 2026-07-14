@@ -14,7 +14,7 @@ from db import (
 )
 from kommo import set_kommo_responsible
 from notifications import notify_admins, notify_admin_error, edit_msg, remove_from_others, schedule_cleanup, schedule_delete_msg, remove_buttons_for_manager
-from queue_logic import assign_next, day_key, build_keyboard, restore_buttons_for_manager
+from queue_logic import assign_next, day_key, build_keyboard, restore_buttons_for_manager, handle_manager_exit
 from sheets import fetch_managers, get_block_reason
 
 logger = logging.getLogger(__name__)
@@ -139,7 +139,7 @@ async def on_work_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if active:
         await restore_buttons_for_manager(user_id)
     else:
-        await remove_buttons_for_manager(user_id)
+        await handle_manager_exit(user_id)
     logger.info(f"{name} {'увійшов в чергу' if active else 'вийшов з черги'}")
 
 
@@ -188,7 +188,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if active:
                 await restore_buttons_for_manager(manager_id)
             else:
-                await remove_buttons_for_manager(manager_id)
+                await handle_manager_exit(manager_id)
             logger.info(f"{name} {'увійшов в чергу' if active else 'вийшов з черги'}")
         except Exception as e:
             logger.error(f"on_callback work: {e}")

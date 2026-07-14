@@ -19,7 +19,7 @@ from db import (
 )
 from notifications import (
     notify_admins, notify_admin_error, send_to, edit_msg, delete_and_send, remove_from_others,
-    cleanup_stale_messages, remove_buttons_for_manager,
+    cleanup_stale_messages, remove_buttons_for_manager, delete_messages_for_manager,
 )
 from sheets import fetch_managers
 
@@ -141,6 +141,28 @@ async def assign_next(lead_id: str, exclude: list[str] = None):
         q("UPDATE leads SET status='queued', manager_id=NULL, sent_at=NULL WHERE lead_id=?", (lead_id,))
         logger.error(f"assign_next відправка {lead_id} → {manager_id}: {e}")
         await notify_admin_error(f"assign_next (відправка заявки #{lead_id})", e, manager_id)
+
+
+async def handle_manager_exit(manager_id: str):
+    """
+    При виході з черги (вручну або автоматично по розкладу) — видаляє всі активні
+    повідомлення менеджера (особисті й broadcast) і, якщо серед них були особисті
+    ("sent") заявки, повертає їх у чергу та передає іншому менеджеру —
+    так само як це робить дія 'skip'.
+    """
+    rows = q("""
+        SELECT lead_id FROM leads
+        WHERE manager_id = ? AND status = 'sent'
+    """, (manager_id,), fetch='all')
+    personal_leads = [r['lead_id'] for r in (rows or [])]
+
+    await delete_messages_for_manager(manager_id)
+
+    for lead_id in personal_leads:
+        lead = get_lead(lead_id)
+        if lead and lead['status'] == 'sent' and lead['manager_id'] == manager_id:
+            q("UPDATE leads SET status='queued', manager_id=NULL, sent_at=NULL WHERE lead_id=?", (lead_id,))
+            await assign_next(lead_id, exclude=get_skipped(lead_id))
 
 
 async def broadcast_to_all(lead_id: str, **tick_ctx):
@@ -465,6 +487,7 @@ async def _check_schedules():
             if working_day in days:
                 if is_available(manager_id) or get_exit_reason(manager_id) == 'has_distributed':
                     set_availability(manager_id, False, reason='schedule')
+                    await handle_manager_exit(manager_id)
                     name = state.MANAGERS_BY_ID.get(manager_id, manager_id)
                     try:
                         await state._app.bot.send_message(
@@ -540,6 +563,7 @@ async def deactivate_out_of_schedule():
 
         if not in_shift:
             set_availability(manager_id, False, reason='schedule')
+            await handle_manager_exit(manager_id)
             name = state.MANAGERS_BY_ID.get(manager_id, manager_id)
             logger.info(f"Старт: {name} поза робочим часом → виведено з черги")
             try:
