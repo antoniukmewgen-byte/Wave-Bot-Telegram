@@ -24,7 +24,7 @@ from queue_logic import assign_next, scheduler_loop, deactivate_out_of_schedule,
 from sheets import warmup
 
 from handlers.manager import on_start, on_work, on_work_button, on_callback
-from handlers.admin import on_admin_button
+from handlers.admin import on_admin_button, on_statuschat_toggle
 from handlers.conversations import (
     LIMIT_SELECT, LIMIT_INPUT, limits_start, limits_select, limits_input, limits_cancel,
     SCHED_SELECT, SCHED_DAYS, SCHED_TIME, SCHED_END_TIME,
@@ -110,6 +110,7 @@ async def lifespan(fastapi: FastAPI):
     ))
     app.add_handler(CommandHandler('start', on_start))
     app.add_handler(CommandHandler('work', on_work))
+    app.add_handler(CommandHandler(['statuson', 'statusoff'], on_statuschat_toggle))
     app.add_handler(MessageHandler(
         filters.TEXT & filters.Regex(r'^(✅ Увійти в чергу|🚫 Вийти з черги)$'),
         on_work_button,

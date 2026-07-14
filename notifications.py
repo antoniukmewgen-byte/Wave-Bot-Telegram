@@ -28,6 +28,26 @@ async def send_long(message, text: str, parse_mode: str = 'HTML'):
         await message.reply_text(chunk.strip(), parse_mode=parse_mode)
 
 
+async def send_long_to_chat(chat_id: str, text: str, parse_mode: str = 'HTML'):
+    """Те саме, що send_long, але шле в довільний chat_id через bot.send_message
+    (для чатів/груп, а не у відповідь на конкретне повідомлення)."""
+    limit = 4096
+    if len(text) <= limit:
+        await state._app.bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
+        return
+    blocks = text.split('\n\n')
+    chunk  = ''
+    for block in blocks:
+        if len(chunk) + len(block) + 2 > limit:
+            if chunk:
+                await state._app.bot.send_message(chat_id=chat_id, text=chunk.strip(), parse_mode=parse_mode)
+            chunk = block
+        else:
+            chunk = chunk + '\n\n' + block if chunk else block
+    if chunk:
+        await state._app.bot.send_message(chat_id=chat_id, text=chunk.strip(), parse_mode=parse_mode)
+
+
 async def notify_admins(text: str):
     for admin_id in ADMIN_IDS:
         try:

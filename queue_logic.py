@@ -16,11 +16,12 @@ from db import (
     get_all_msgs, claim_lead_for_send, delete_msg, is_available, set_availability,
     get_all_managers, get_manager, get_exit_reason,
     add_distributed_lead, remove_distributed_lead, count_distributed_leads, get_distributed_lead,
-    transfer_taken,
+    transfer_taken, get_connected, get_managers_dict, get_all_exit_reasons, get_status_chats,
 )
 from notifications import (
     notify_admins, notify_admin_error, send_to, edit_msg, delete_and_send, remove_from_others,
     cleanup_stale_messages, remove_buttons_for_manager, delete_messages_for_manager,
+    send_long_to_chat,
 )
 from sheets import fetch_managers, fetch_managers_async
 
@@ -54,6 +55,68 @@ def _build_sent_map() -> dict:
         fetch='all',
     )
     return {r['manager_id']: r['cnt'] for r in rows} if rows else {}
+
+
+def build_manager_status_text(managers: dict) -> str:
+    """
+    Формує той самий текст, що і кнопка "👥 Статус менеджерів" в адмінці —
+    винесено сюди, щоб використовувати і по кнопці, і в періодичній розсилці в чат.
+    """
+    month         = day_key()
+    connected_ids = {r['manager_id'] for r in get_connected()}
+    avail_map     = get_all_availability()
+    overrides     = get_all_max_leads_overrides()
+    taken_map     = get_all_taken(month)
+    sent_map      = _build_sent_map()
+    exit_reasons  = get_all_exit_reasons()
+
+    lines = ["👥 <b>Статус менеджерів:</b>\n"]
+    for name, tg_id in get_managers_dict().items():
+        if tg_id not in managers:
+            continue
+        if tg_id not in connected_ids:
+            lines.append(f"(КОРИСТУВАЧ ❌) {name} — ще не підключився")
+            continue
+        taken     = taken_map.get(tg_id, 0)
+        info      = managers.get(tg_id, {})
+        max_leads = overrides[tg_id] if tg_id in overrides else info.get('max_leads')
+        lim_mark  = " ✏️" if tg_id in overrides else ""
+        limit_str = '∞' if max_leads is None else f"{max_leads}{lim_mark}"
+        at_limit  = max_leads is not None and taken >= max_leads
+        is_active = avail_map.get(tg_id, False)
+        has_pending = sent_map.get(tg_id, 0) > 0
+
+        if at_limit:
+            lines.append(f"(БОТ ⛔) {name} — ліміт вичерпано | взяв: {taken}/{limit_str}")
+        elif not is_active:
+            reason = exit_reasons.get(tg_id)
+            if reason == 'has_distributed':
+                lines.append(f"(БОТ 📞) {name} — на зв'язку з клієнтом | взяв: {taken}/{limit_str}")
+            elif reason == 'blocked':
+                lines.append(f"(БОТ 🔒) {name} — недостатні показники | взяв: {taken}/{limit_str}")
+            elif reason == 'bot_blocked':
+                lines.append(f"(БОТ 🔕) {name} — заблокував бота | взяв: {taken}/{limit_str}")
+            else:
+                lines.append(f"(КОРИСТУВАЧ 🚫) {name} — не в роботі | взяв: {taken}/{limit_str}")
+        elif has_pending:
+            lines.append(f"(КОРИСТУВАЧ 📨) {name} — очікує відповіді | взяв: {taken}/{limit_str}")
+        else:
+            lines.append(f"(КОРИСТУВАЧ ✅) {name} — в роботі | взяв: {taken}/{limit_str}")
+    return '\n'.join(lines)
+
+
+async def broadcast_manager_status():
+    """Надсилає поточний статус менеджерів у всі чати, де увімкнена розсилка (/statuson)."""
+    chat_ids = get_status_chats()
+    if not chat_ids:
+        return
+    managers = await fetch_managers_async()
+    text     = build_manager_status_text(managers)
+    for chat_id in chat_ids:
+        try:
+            await send_long_to_chat(chat_id, text)
+        except Exception as e:
+            logger.warning(f"broadcast_manager_status: не вдалось надіслати в чат {chat_id}: {e}")
 
 
 def sorted_queue(
@@ -614,6 +677,16 @@ async def deactivate_out_of_schedule():
             await notify_admins(f"🌙 <b>{name}</b> автоматично виведено з черги (поза робочим часом при старті)")
 
 
+_STATUS_BROADCAST_HOURS = {f"{h:02d}:00" for h in range(17, 23)}  # 17:00 .. 22:00 включно
+
+
+async def _check_status_broadcast():
+    """Раз на годину (17:00–22:00) шле статус менеджерів у зареєстровані чати."""
+    now = datetime.now(_TZ)
+    if now.strftime('%H:%M') in _STATUS_BROADCAST_HOURS:
+        await broadcast_manager_status()
+
+
 async def scheduler_loop():
     _now_tz          = lambda: datetime.now(_TZ)
     last_cleanup      = _now_tz().month
@@ -635,6 +708,7 @@ async def scheduler_loop():
             if cur_min != last_sch_min:
                 last_sch_min = cur_min
                 await _check_schedules()
+                await _check_status_broadcast()
             if now.timestamp() - last_msg_cleanup >= 300:
                 await cleanup_stale_messages()
                 last_msg_cleanup = now.timestamp()

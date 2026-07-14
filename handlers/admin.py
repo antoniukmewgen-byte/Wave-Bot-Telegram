@@ -11,10 +11,11 @@ from db import (
     q, get_all_taken, get_all_availability, get_all_max_leads_overrides,
     get_all_exit_reasons, get_connected, get_managers_dict, get_all_managers,
     get_pending_managers, approve_manager, delete_manager,
+    add_status_chat, remove_status_chat,
 )
 from kommo import sync_from_kommo
 from notifications import send_long, notify_admin_error
-from queue_logic import day_key, _build_sent_map, cleanup_orphaned_manager_messages
+from queue_logic import day_key, _build_sent_map, cleanup_orphaned_manager_messages, build_manager_status_text
 from sheets import fetch_managers_async
 
 logger = logging.getLogger(__name__)
@@ -34,47 +35,28 @@ ADMIN_KB = ReplyKeyboardMarkup(
 
 
 async def _handle_manager_status(message, managers: dict):
-    month         = day_key()
-    connected_ids = {r['manager_id'] for r in get_connected()}
-    avail_map     = get_all_availability()
-    overrides     = get_all_max_leads_overrides()
-    taken_map     = get_all_taken(month)
-    sent_map      = _build_sent_map()
-    exit_reasons  = get_all_exit_reasons()
+    await send_long(message, build_manager_status_text(managers))
 
-    lines = ["👥 <b>Статус менеджерів:</b>\n"]
-    for name, tg_id in get_managers_dict().items():
-        if tg_id not in managers:
-            continue
-        if tg_id not in connected_ids:
-            lines.append(f"(КОРИСТУВАЧ ❌) {name} — ще не підключився")
-            continue
-        taken     = taken_map.get(tg_id, 0)
-        info      = managers.get(tg_id, {})
-        max_leads = overrides[tg_id] if tg_id in overrides else info.get('max_leads')
-        lim_mark  = " ✏️" if tg_id in overrides else ""
-        limit_str = '∞' if max_leads is None else f"{max_leads}{lim_mark}"
-        at_limit  = max_leads is not None and taken >= max_leads
-        is_active = avail_map.get(tg_id, False)
-        has_pending = sent_map.get(tg_id, 0) > 0
 
-        if at_limit:
-            lines.append(f"(БОТ ⛔) {name} — ліміт вичерпано | взяв: {taken}/{limit_str}")
-        elif not is_active:
-            reason = exit_reasons.get(tg_id)
-            if reason == 'has_distributed':
-                lines.append(f"(БОТ 📞) {name} — на зв'язку з клієнтом | взяв: {taken}/{limit_str}")
-            elif reason == 'blocked':
-                lines.append(f"(БОТ 🔒) {name} — недостатні показники | взяв: {taken}/{limit_str}")
-            elif reason == 'bot_blocked':
-                lines.append(f"(БОТ 🔕) {name} — заблокував бота | взяв: {taken}/{limit_str}")
-            else:
-                lines.append(f"(КОРИСТУВАЧ 🚫) {name} — не в роботі | взяв: {taken}/{limit_str}")
-        elif has_pending:
-            lines.append(f"(КОРИСТУВАЧ 📨) {name} — очікує відповіді | взяв: {taken}/{limit_str}")
-        else:
-            lines.append(f"(КОРИСТУВАЧ ✅) {name} — в роботі | взяв: {taken}/{limit_str}")
-    await send_long(message, '\n'.join(lines))
+async def on_statuschat_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/statuson і /statusoff — вмикає/вимикає щогодинну розсилку статусу менеджерів
+    (17:00–22:00) у поточному чаті/групі. Тільки для адмінів."""
+    user_id = str(update.effective_user.id)
+    if user_id not in ADMIN_IDS:
+        return
+
+    command  = update.message.text.split()[0].lstrip('/').split('@')[0].lower()
+    chat_id  = update.effective_chat.id
+
+    if command == 'statuson':
+        add_status_chat(chat_id)
+        await update.message.reply_text(
+            "✅ Розсилку статусу менеджерів увімкнено для цього чату.\n"
+            "Щогодини з 17:00 до 22:00 сюди прилітатиме звіт."
+        )
+    elif command == 'statusoff':
+        remove_status_chat(chat_id)
+        await update.message.reply_text("🔕 Розсилку статусу менеджерів для цього чату вимкнено.")
 
 
 async def _handle_connections(message):

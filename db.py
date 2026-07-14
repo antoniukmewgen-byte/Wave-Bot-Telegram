@@ -106,6 +106,10 @@ def _create_tables():
                 lead_id    TEXT PRIMARY KEY,
                 manager_id TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS status_chats (
+                chat_id    TEXT PRIMARY KEY,
+                added_at   REAL
+            );
         """)
 
 
@@ -252,6 +256,20 @@ def take_lead(lead_id: str, manager_id: str, month: str) -> bool:
         raise
     finally:
         _release_conn(conn)
+
+
+def add_status_chat(chat_id: str):
+    q("INSERT OR REPLACE INTO status_chats (chat_id, added_at) VALUES (?, ?)",
+      (str(chat_id), datetime.now().timestamp()))
+
+
+def remove_status_chat(chat_id: str):
+    q("DELETE FROM status_chats WHERE chat_id=?", (str(chat_id),))
+
+
+def get_status_chats() -> list:
+    rows = q("SELECT chat_id FROM status_chats", fetch='all')
+    return [r['chat_id'] for r in rows] if rows else []
 
 
 def get_msg_id(lead_id: str, manager_id: str) -> Optional[int]:
