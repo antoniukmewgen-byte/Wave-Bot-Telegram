@@ -294,7 +294,7 @@ async def _handle_diagnostics(message):
         fetch='all',
     ) or []
     msg_counts = {}
-    for row in (q("SELECT lead_id, COUNT(*) as cnt FROM messages GROUP BY lead_id", fetch='all') or []):
+    for row in (q("SELECT lead_id, COUNT(*) as cnt FROM messages WHERE active=1 GROUP BY lead_id", fetch='all') or []):
         msg_counts[row['lead_id']] = row['cnt']
 
     lines.append(f"📋 <b>Активні заявки ({len(all_leads)}):</b>")

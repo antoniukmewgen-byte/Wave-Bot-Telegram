@@ -5,7 +5,7 @@ from telegram.error import Forbidden, RetryAfter, TimedOut, NetworkError
 
 import state
 from config import ADMIN_IDS
-from db import q, get_msg_id, save_msg, get_all_msgs, set_availability, delete_manager
+from db import q, get_msg_id, save_msg, get_all_msgs, set_availability, delete_manager, set_msg_active
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +114,7 @@ async def edit_msg(manager_id: str, lead_id: str, text: str, keyboard=None):
             reply_markup=keyboard,
             parse_mode='HTML',
         )
+        set_msg_active(lead_id, manager_id, keyboard is not None)
     except Forbidden:
         await _deactivate_blocked(manager_id)
     except Exception as e:

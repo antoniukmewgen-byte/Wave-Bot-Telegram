@@ -64,6 +64,7 @@ def _create_tables():
                 lead_id    TEXT NOT NULL,
                 manager_id TEXT NOT NULL,
                 msg_id     INTEGER NOT NULL,
+                active     INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (lead_id, manager_id)
             );
             CREATE TABLE IF NOT EXISTS stats (
@@ -116,6 +117,7 @@ def _migrate():
         "ALTER TABLE availability ADD COLUMN max_leads INTEGER",
         "ALTER TABLE availability ADD COLUMN exit_reason TEXT",
         "ALTER TABLE schedules ADD COLUMN end_time TEXT NOT NULL DEFAULT '23:00'",
+        "ALTER TABLE messages ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
     ]
     with sqlite3.connect(DB_PATH) as c:
         for sql in migrations:
@@ -259,8 +261,14 @@ def get_msg_id(lead_id: str, manager_id: str) -> Optional[int]:
 
 
 def save_msg(lead_id: str, manager_id: str, msg_id: int):
-    q("INSERT OR REPLACE INTO messages (lead_id, manager_id, msg_id) VALUES (?,?,?)",
+    q("INSERT OR REPLACE INTO messages (lead_id, manager_id, msg_id, active) VALUES (?,?,?,1)",
       (lead_id, manager_id, msg_id))
+
+
+def set_msg_active(lead_id: str, manager_id: str, active: bool):
+    """Позначає, чи повідомлення досі 'живе' (з кнопкою) — для коректної діагностики."""
+    q("UPDATE messages SET active=? WHERE lead_id=? AND manager_id=?",
+      (1 if active else 0, lead_id, manager_id))
 
 
 def delete_msg(lead_id: str, manager_id: str):
