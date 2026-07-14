@@ -6,11 +6,11 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 import state
-from config import ADMIN_IDS
+from config import ADMIN_IDS, AMO_SUBDOMAIN
 from db import (
     q, get_lead, get_taken, get_all_max_leads_overrides,
     is_available, set_availability, mark_connected, mark_skipped, get_skipped, take_lead,
-    get_last_connected_ts, get_manager, clear_distributed_leads,
+    get_last_connected_ts, get_manager, get_manager_distributed_leads, add_distributed_lead,
 )
 from kommo import set_kommo_responsible
 from notifications import notify_admins, notify_admin_error, edit_msg, remove_from_others, schedule_cleanup, schedule_delete_msg, remove_buttons_for_manager
@@ -30,6 +30,15 @@ def work_keyboard(is_active: bool) -> InlineKeyboardMarkup:
     label = "🚫 Вийти з черги" if is_active else "✅ Увійти в чергу"
     data  = "work:off"         if is_active else "work:on"
     return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=data)]])
+
+
+def _still_distributed_text(lead_ids: list[str]) -> str:
+    links = "\n".join(f"• https://{AMO_SUBDOMAIN}.kommo.com/leads/detail/{lid}" for lid in lead_ids)
+    return (
+        "⛔ У вас ще є заявка в статусі «Распределены» — ви досі на зв'язку з клієнтом:\n"
+        f"{links}\n\n"
+        "Ви повернетесь в чергу автоматично, щойно її статус зміниться."
+    )
 
 
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -118,8 +127,13 @@ async def on_work_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             set_availability(user_id, False, reason='blocked')
             return
 
+    if active:
+        pending = get_manager_distributed_leads(user_id)
+        if pending:
+            await update.message.reply_text(_still_distributed_text(pending), reply_markup=MANAGER_KB)
+            return
+
     set_availability(user_id, active, reason=None if active else 'manual')
-    clear_distributed_leads(user_id)
     status = "✅ Ви в черзі — заявки надходитимуть" if active else "🚫 Ви вийшли з черги — заявки не надходитимуть"
     await update.message.reply_text(status, reply_markup=MANAGER_KB)
     if active:
@@ -152,8 +166,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer()
                 return
             active = (lead_id == 'on')
+            if active:
+                pending = get_manager_distributed_leads(manager_id)
+                if pending:
+                    await query.answer()
+                    await query.edit_message_text(
+                        f"👤 <b>{name}</b>\n\n{_still_distributed_text(pending)}",
+                        reply_markup=work_keyboard(False),
+                        parse_mode='HTML',
+                    )
+                    return
+
             set_availability(manager_id, active, reason=None if active else 'manual')
-            clear_distributed_leads(manager_id)
             await query.answer()
             status = "✅ Ви в черзі — заявки надходитимуть" if active else "🚫 Ви вийшли з черги — заявки не надходитимуть"
             await query.edit_message_text(
@@ -208,6 +232,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer("❌ Заявку вже взяв інший менеджер", show_alert=True)
                 await edit_msg(manager_id, lead_id, "❌ Заявку вже взяв інший менеджер")
                 return
+
+            # Одразу виводимо з черги — не чекаємо вебхука Kommo про 'Распределены',
+            # бо в цьому вікні черга могла встигнути надіслати ще один лід.
+            # on_lead_distributed пізніше підтвердить той самий стан (ідемпотентно).
+            add_distributed_lead(lead_id, manager_id)
+            if is_available(manager_id):
+                set_availability(manager_id, False, reason='has_distributed')
+                await remove_buttons_for_manager(manager_id)
 
             await query.answer()
             await edit_msg(manager_id, lead_id, f"✅ Ви взяли заявку в роботу!\n\n{lead['title']}")

@@ -438,9 +438,11 @@ def count_distributed_leads(manager_id: str) -> int:
     return int(row['cnt']) if row else 0
 
 
-def clear_distributed_leads(manager_id: str):
-    """Скидає всі записи 'Распределены' для менеджера (при ручному виході з черги)."""
-    q("DELETE FROM distributed_leads WHERE manager_id=?", (manager_id,))
+def get_manager_distributed_leads(manager_id: str) -> list[str]:
+    """Список lead_id усіх заявок, які зараз у 'Распределены' на цьому менеджері."""
+    rows = q("SELECT lead_id FROM distributed_leads WHERE manager_id=?",
+             (manager_id,), fetch='all')
+    return [r['lead_id'] for r in (rows or [])]
 
 
 def migrate_managers_from_config(managers_dict: dict, kommo_ids_dict: dict):
