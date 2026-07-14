@@ -10,7 +10,7 @@ from db import (
     get_all_max_leads_overrides, get_all_schedules, set_max_leads_override, set_schedule,
     get_managers_dict, upsert_manager, get_manager, get_all_managers,
 )
-from sheets import fetch_managers
+from sheets import fetch_managers_async
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ async def limits_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ У вас немає доступу до цієї функції.")
         return ConversationHandler.END
 
-    managers  = fetch_managers()
+    managers  = await fetch_managers_async()
     overrides = get_all_max_leads_overrides()
 
     buttons = []
@@ -73,7 +73,7 @@ async def limits_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     tg_id    = query.data.split(':', 1)[1]
-    managers = fetch_managers()
+    managers = await fetch_managers_async()
     name     = managers.get(tg_id, {}).get('name', tg_id)
 
     context.user_data['limit_tg_id'] = tg_id
@@ -302,7 +302,7 @@ async def reg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Список імен з Google Sheets (тільки ті, кого немає в БД)
     try:
-        sheet_data = fetch_managers()
+        sheet_data = await fetch_managers_async()
         registered_sheet_names = {
             r['sheet_name'] for r in get_all_managers(approved_only=False)
             if r['sheet_name']

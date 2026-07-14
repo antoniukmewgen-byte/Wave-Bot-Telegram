@@ -15,7 +15,7 @@ from db import (
 from kommo import sync_from_kommo
 from notifications import send_long, notify_admin_error
 from queue_logic import day_key, _build_sent_map, cleanup_orphaned_manager_messages
-from sheets import fetch_managers
+from sheets import fetch_managers_async
 
 logger = logging.getLogger(__name__)
 
@@ -326,7 +326,7 @@ async def _handle_diagnostics(message):
     exit_reasons = get_all_exit_reasons()
 
     try:
-        managers  = fetch_managers()
+        managers  = await fetch_managers_async()
         sheets_ok = True
     except Exception as e:
         managers  = {}
@@ -462,7 +462,7 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text     = update.message.text
-    managers = fetch_managers()
+    managers = await fetch_managers_async()
 
     if text == "👥 Статус менеджерів":
         await _handle_manager_status(update.message, managers)

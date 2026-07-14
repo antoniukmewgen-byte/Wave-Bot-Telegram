@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import threading
 from datetime import datetime
@@ -184,6 +185,23 @@ def fetch_managers() -> Dict[str, dict]:
             logger.error(f"Sheets помилка: {e}")
 
     return _cache
+
+
+async def fetch_managers_async() -> Dict[str, dict]:
+    """
+    Async-безпечна обгортка над fetch_managers().
+
+    fetch_managers() сама по собі синхронна: коли кеш (SHEETS_REFRESH) протух,
+    вона виконує "живий" мережевий запит до Google Sheets і блокує потік до
+    відповіді. Викликана напряму з async-коду (хендлери, _tick тощо) вона
+    заморожує весь asyncio event loop бота — тобто взагалі всіх користувачів —
+    на час цього запиту, приблизно раз на хвилину.
+
+    Ця функція виносить виклик в окремий потік через asyncio.to_thread, тому
+    event loop лишається вільним. Кешування, локи й логіка fetch_managers()
+    лишаються без змін — тут просто інший спосіб її викликати з async-коду.
+    """
+    return await asyncio.to_thread(fetch_managers)
 
 
 def get_block_reason(tg_id: str) -> Optional[str]:

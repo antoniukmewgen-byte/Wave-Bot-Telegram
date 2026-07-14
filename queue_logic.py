@@ -21,7 +21,7 @@ from notifications import (
     notify_admins, notify_admin_error, send_to, edit_msg, delete_and_send, remove_from_others,
     cleanup_stale_messages, remove_buttons_for_manager, delete_messages_for_manager,
 )
-from sheets import fetch_managers
+from sheets import fetch_managers, fetch_managers_async
 
 import state
 
@@ -101,8 +101,11 @@ def sorted_queue(
 
 
 async def assign_next(lead_id: str, exclude: list[str] = None):
+    # Фетчимо менеджерів заздалегідь (в окремому потоці, не блокуючи event loop)
+    # і передаємо в sorted_queue, щоб вона не робила це сама синхронно всередині.
+    managers = await fetch_managers_async()
     try:
-        queue = sorted_queue(exclude=exclude)
+        queue = sorted_queue(exclude=exclude, managers=managers)
     except Exception as e:
         await notify_admin_error("assign_next (читання черги)", e)
         return
@@ -120,7 +123,6 @@ async def assign_next(lead_id: str, exclude: list[str] = None):
         return
 
     manager_id   = queue[0]
-    managers     = fetch_managers()
     manager_name = managers.get(manager_id, {}).get('name', 'Менеджер')
 
     lead = get_lead(lead_id)
@@ -424,7 +426,7 @@ async def _tick():
         if not leads:
             return
 
-        managers  = fetch_managers()
+        managers  = await fetch_managers_async()
         taken_map = get_all_taken(day_key())
         avail_map = get_all_availability()
         overrides = get_all_max_leads_overrides()

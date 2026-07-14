@@ -15,7 +15,7 @@ from db import (
 from kommo import set_kommo_responsible
 from notifications import notify_admins, notify_admin_error, edit_msg, remove_from_others, schedule_cleanup, schedule_delete_msg, remove_buttons_for_manager
 from queue_logic import assign_next, day_key, build_keyboard, restore_buttons_for_manager, handle_manager_exit
-from sheets import fetch_managers, get_block_reason
+from sheets import fetch_managers_async, get_block_reason
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ async def on_work_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active = update.message.text == "✅ Увійти в чергу"
 
     if active:
-        managers = fetch_managers()
+        managers = await fetch_managers_async()
         if user_id not in managers:
             reason = get_block_reason(user_id) or "❌ Ви не можете увійти в чергу. Зверніться до керівника."
             await update.message.reply_text(reason, reply_markup=MANAGER_KB)
@@ -208,7 +208,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await edit_msg(manager_id, lead_id, "❌ Цю заявку вже оброблено")
         return
 
-    managers = fetch_managers()
+    managers = await fetch_managers_async()
     mgr_name = managers.get(manager_id, {}).get('name', query.from_user.first_name or manager_id)
 
     try:
