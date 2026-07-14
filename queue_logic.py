@@ -165,6 +165,40 @@ async def handle_manager_exit(manager_id: str):
             await assign_next(lead_id, exclude=get_skipped(lead_id))
 
 
+async def cleanup_orphaned_manager_messages() -> int:
+    """
+    Одноразовий (можна викликати вручну, напр. кнопкою в адмінці) cleanup для
+    "привидів" — повідомлень, що лишились у менеджерів, які вийшли з черги ще
+    ДО того як з'явився handle_manager_exit (тобто на старому коді), і тому
+    ніколи не були видалені.
+
+    Для кожного менеджера, який зараз is_active=0, але все ще має рядки в
+    messages по активних (не taken/duplicate/closed) заявках — прибирає їх
+    так само, як реальний вихід із черги: видаляє смс у Telegram + рядок з БД,
+    а особисті ("sent") заявки повертає в чергу через assign_next.
+
+    Повертає кількість менеджерів, для яких було що прибирати.
+    """
+    avail_map = get_all_availability()
+    inactive  = [mid for mid, active in avail_map.items() if not active]
+
+    cleaned = 0
+    for manager_id in inactive:
+        row = q("""
+            SELECT COUNT(*) as cnt FROM messages m
+            JOIN leads l ON l.lead_id = m.lead_id
+            WHERE m.manager_id = ?
+              AND l.status NOT IN ('taken', 'duplicate', 'closed')
+        """, (manager_id,), fetch='one')
+        if row and row['cnt']:
+            await handle_manager_exit(manager_id)
+            cleaned += 1
+
+    if cleaned:
+        logger.info(f"cleanup_orphaned_manager_messages: прибрано привидів у {cleaned} неактивних менеджерів")
+    return cleaned
+
+
 async def broadcast_to_all(lead_id: str, **tick_ctx):
     """
     Розіслати заявку всім вільним менеджерам.

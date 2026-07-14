@@ -14,7 +14,7 @@ from db import (
 )
 from kommo import sync_from_kommo
 from notifications import send_long, notify_admin_error
-from queue_logic import day_key, _build_sent_map
+from queue_logic import day_key, _build_sent_map, cleanup_orphaned_manager_messages
 from sheets import fetch_managers
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ ADMIN_KB = ReplyKeyboardMarkup(
         [KeyboardButton("📋 Активні заявки"),    KeyboardButton("⚙️ Ліміти")],
         [KeyboardButton("🔄 Синхронізація"),     KeyboardButton("🔌 Підключення")],
         [KeyboardButton("⏰ Розклади"),           KeyboardButton("🔍 Діагностика")],
-        [KeyboardButton("👤 Менеджери")],
+        [KeyboardButton("👤 Менеджери"),          KeyboardButton("🧹 Прибрати привиди")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -396,6 +396,24 @@ async def _handle_sync(message):
         logger.error(f"Sync error: {e}")
 
 
+async def _handle_cleanup_orphans(message):
+    """
+    Одноразовий ручний cleanup: прибирає у Telegram + в БД "привиди" повідомлень
+    у менеджерів, які зараз поза чергою, але ще тримають старі активні заявки
+    (лишились від виходів ДО фіксу handle_manager_exit).
+    """
+    msg = await message.reply_text("🧹 Шукаю привидів... зачекайте")
+    try:
+        cleaned = await cleanup_orphaned_manager_messages()
+        if cleaned:
+            await msg.edit_text(f"✅ Прибрано привидів у <b>{cleaned}</b> неактивних менеджерів", parse_mode='HTML')
+        else:
+            await msg.edit_text("✅ Привидів не знайдено — все чисто")
+    except Exception as e:
+        await msg.edit_text(f"❌ Помилка cleanup: {e}")
+        logger.error(f"Cleanup orphans error: {e}")
+
+
 async def _handle_managers_list(message):
     """Показує список всіх менеджерів у БД та заявки на схвалення."""
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -464,3 +482,5 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _handle_diagnostics(update.message)
     elif text == "👤 Менеджери":
         await _handle_managers_list(update.message)
+    elif text == "🧹 Прибрати привиди":
+        await _handle_cleanup_orphans(update.message)
