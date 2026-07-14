@@ -274,6 +274,13 @@ def is_available(manager_id: str) -> bool:
     return bool(row['is_active']) if row else False
 
 
+def get_exit_reason(manager_id: str) -> Optional[str]:
+    """Повертає поточний exit_reason менеджера (None якщо в черзі або запису нема)."""
+    row = q("SELECT exit_reason FROM availability WHERE manager_id=?",
+            (manager_id,), fetch='one')
+    return row['exit_reason'] if row else None
+
+
 def get_all_exit_reasons() -> dict:
     """Повертає {manager_id: exit_reason} для менеджерів поза чергою."""
     rows = q("SELECT manager_id, exit_reason FROM availability WHERE is_active=0 AND exit_reason IS NOT NULL",

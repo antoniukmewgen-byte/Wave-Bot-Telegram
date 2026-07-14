@@ -14,7 +14,7 @@ from db import (
     q, get_lead, get_all_taken, get_all_availability, get_all_max_leads_overrides,
     get_skipped, get_all_schedules, update_last_notified, reset_all_limit_overrides, get_msg_id,
     get_all_msgs, claim_lead_for_send, delete_msg, is_available, set_availability,
-    get_all_managers, get_manager,
+    get_all_managers, get_manager, get_exit_reason,
     add_distributed_lead, remove_distributed_lead, count_distributed_leads,
 )
 from notifications import (
@@ -455,10 +455,15 @@ async def _check_schedules():
         crosses   = end <= start  # зміна переходить через північ (напр. 22:00–05:00)
 
         # ── Авто-деактивація в кінці зміни ──────────────────────────────────
+        # Спрацьовує навіть якщо менеджер зараз поза чергою через 'has_distributed' —
+        # інакше після закриття заявки on_lead_undistributed поверне його в чергу
+        # вночі, вже після завершення зміни. Виконується лише один раз за хвилину
+        # завдяки самообмеженню: одразу після виклику reason стає 'schedule',
+        # тож умова нижче більше не виконується на наступних тіках.
         if current_time == end:
             working_day = yesterday if crosses else weekday
             if working_day in days:
-                if is_available(manager_id):
+                if is_available(manager_id) or get_exit_reason(manager_id) == 'has_distributed':
                     set_availability(manager_id, False, reason='schedule')
                     name = state.MANAGERS_BY_ID.get(manager_id, manager_id)
                     try:
@@ -519,7 +524,7 @@ async def deactivate_out_of_schedule():
     for manager_id, sch in schedules.items():
         if not sch.get('enabled', 1):
             continue
-        if not is_available(manager_id):
+        if not is_available(manager_id) and get_exit_reason(manager_id) != 'has_distributed':
             continue
 
         days    = [int(d) for d in sch['days'].split(',') if d.strip()]
