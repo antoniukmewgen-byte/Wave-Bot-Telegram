@@ -17,8 +17,8 @@ from config import (
     AMO_PIPELINE_ID, AMO_HOT_STATUS_ID,
     AMO_DISTRIBUTED_STATUS_ID, AMO_DISTRIBUTED_PIPELINE_ID,
 )
-from db import init_db, q, get_lead, init_default_schedules, get_managers_dict, get_distributed_lead
-from kommo import make_lead_title
+from db import init_db, q, get_lead, get_manager, init_default_schedules, get_managers_dict, get_distributed_lead
+from kommo import make_lead_title, get_lead_responsible
 from notifications import notify_admin_error, remove_from_others, schedule_cleanup
 from queue_logic import assign_next, scheduler_loop, deactivate_out_of_schedule, on_lead_distributed, on_lead_undistributed
 from sheets import warmup
@@ -257,12 +257,30 @@ async def _handle_lead_event(event: dict):
     # ── Заявка покинула статус "Распределены" ───────────────────────────────
     distributed_row = get_distributed_lead(lead_id)
     if distributed_row:
-        logger.info(
-            f"Webhook: заявка {lead_id} покинула 'Распределены' "
-            f"(менеджер {distributed_row['manager_id']})"
-        )
-        asyncio.create_task(on_lead_undistributed(lead_id, distributed_row['manager_id']))
-        # Не повертаємось — продовжуємо стандартну обробку (закриття в боті)
+        should_release = True
+
+        if str(pipeline_id) == AMO_PIPELINE_ID:
+            # Лід досі в нашій гарячій воронці — сюди потрапляє як "відлуння"
+            # від PATCH, яким бот сам щойно виставив відповідального (менеджер
+            # натиснув "Беру в роботу"), так і справжня ситуація, коли
+            # відповідального руками змінили в CRM. pipeline/status в обох
+            # випадках однакові, тому розрізняємо за ФАКТИЧНИМ відповідальним:
+            # якщо в Kommo відповідальний — той самий менеджер, що вже
+            # трекається як "розподілений", це наше власне відлуння і нічого
+            # робити не треба; якщо відповідальний інший — заявку справді
+            # передали комусь ще, повертаємо старого менеджера в чергу.
+            current_kommo_id = await get_lead_responsible(lead_id)
+            tracked_mgr      = get_manager(distributed_row['manager_id'])
+            tracked_kommo_id = tracked_mgr['kommo_id'] if tracked_mgr else None
+            should_release   = current_kommo_id != tracked_kommo_id
+
+        if should_release:
+            logger.info(
+                f"Webhook: заявка {lead_id} покинула 'Распределены' "
+                f"(менеджер {distributed_row['manager_id']})"
+            )
+            asyncio.create_task(on_lead_undistributed(lead_id, distributed_row['manager_id']))
+            # Не повертаємось — продовжуємо стандартну обробку (закриття в боті)
 
     if str(pipeline_id) != AMO_PIPELINE_ID:
         lead = get_lead(lead_id)
