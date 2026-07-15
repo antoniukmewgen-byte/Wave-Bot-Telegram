@@ -97,6 +97,8 @@ def build_manager_status_text(managers: dict) -> str:
                 lines.append(f"(БОТ 🔒) {name} — недостатні показники | взяв: {taken}/{limit_str}")
             elif reason == 'bot_blocked':
                 lines.append(f"(БОТ 🔕) {name} — заблокував бота | взяв: {taken}/{limit_str}")
+            elif reason == 'schedule':
+                lines.append(f"(БОТ 🌙) {name} — зміна закінчилась | взяв: {taken}/{limit_str}")
             else:
                 lines.append(f"(КОРИСТУВАЧ 🚫) {name} — не в роботі | взяв: {taken}/{limit_str}")
         elif has_pending:
