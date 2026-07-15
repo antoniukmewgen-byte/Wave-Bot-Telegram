@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone as _timezone
 _TZ = _timezone(timedelta(hours=3))
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import Forbidden
 
 from config import (
     TIMEOUT_PERSONAL, TIMEOUT_WARN, TIMEOUT_SOS, TIMEOUT_REBROADCAST, SCHEDULER_TICK,
@@ -21,7 +22,7 @@ from db import (
 from notifications import (
     notify_admins, notify_admin_error, send_to, edit_msg, delete_and_send, remove_from_others,
     cleanup_stale_messages, remove_buttons_for_manager, delete_messages_for_manager,
-    send_long_to_chat,
+    send_long_to_chat, _deactivate_blocked,
 )
 from sheets import fetch_managers, fetch_managers_async
 
@@ -554,6 +555,9 @@ async def _send_shift_reminder(manager_id: str, name: str):
             parse_mode='HTML',
         )
         logger.info(f"Schedule: нагадування надіслано {name} ({manager_id})")
+    except Forbidden:
+        logger.warning(f"Schedule: {name} ({manager_id}) заблокував бота — деактивуємо")
+        await _deactivate_blocked(manager_id)
     except Exception as e:
         logger.warning(f"Schedule: не вдалось надіслати {manager_id}: {e}")
 
