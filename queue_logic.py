@@ -47,6 +47,14 @@ def build_keyboard(lead_id: str) -> InlineKeyboardMarkup:
     ]])
 
 
+def build_broadcast_keyboard(lead_id: str) -> InlineKeyboardMarkup:
+    """Клавіатура для broadcast-повідомлень (відкрита черга) — без кнопки "Не можу взяти"."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Беру в роботу", callback_data=f"t:{lead_id}"),
+        InlineKeyboardButton("🔁 Дубль",         callback_data=f"d:{lead_id}"),
+    ]])
+
+
 def _build_sent_map() -> dict:
     """Скільки заявок зараз персонально відправлено кожному менеджеру (status='sent')."""
     rows = q(
@@ -280,7 +288,7 @@ async def broadcast_to_all(lead_id: str, **tick_ctx):
     orig_manager = lead['manager_id']
     skipped      = get_skipped(lead_id)
     text         = f"{lead['title']}\n👤 <i>Відкрита черга</i>"
-    kb           = build_keyboard(lead_id)
+    kb           = build_broadcast_keyboard(lead_id)
 
     # Активна broadcast — та що вже реально надіслана всім (є sent_at)
     active_broadcast = q(
@@ -362,7 +370,7 @@ async def restore_buttons_for_manager(manager_id: str):
         else:
             text = f"🆘🚨💀🔴 <b>SOS!!!</b>\n\n{lead['title']}"
         try:
-            await send_to(manager_id, lead['lead_id'], text, build_keyboard(lead['lead_id']))
+            await send_to(manager_id, lead['lead_id'], text, build_broadcast_keyboard(lead['lead_id']))
             logger.info(f"restore: надіслано broadcast заявку {lead['lead_id']} → {manager_id}")
         except Exception as e:
             logger.error(f"restore: не вдалось надіслати {lead['lead_id']} → {manager_id}: {e}")
@@ -385,7 +393,7 @@ async def escalate_warn(lead_id: str, title: str, **tick_ctx):
         f"⚠️⚠️⚠️ <b>ТЕРМІНОВО!</b>\n"
         f"Заявка вже <b>5 хвилин</b> без відповіді!\n\n{title}"
     )
-    kb        = build_keyboard(lead_id)
+    kb        = build_broadcast_keyboard(lead_id)
     queue     = sorted_queue(exclude=get_skipped(lead_id), **tick_ctx)
     queue_set = set(queue)
     for mid in queue:
@@ -404,7 +412,7 @@ async def escalate_sos(lead_id: str, title: str, **tick_ctx):
         f"🆘🚨💀🔴 <b>SOS!!! ЗАЯВКА 10 ХВИЛИН!!!</b> 🔴💀🚨🆘\n"
         f"😱🔥💥 ХТОСЬ ВІЗЬМІТЬ ВЖЕ! 💥🔥😱\n\n{title}"
     )
-    kb        = build_keyboard(lead_id)
+    kb        = build_broadcast_keyboard(lead_id)
     queue     = sorted_queue(exclude=get_skipped(lead_id), **tick_ctx)
     queue_set = set(queue)
     for mid in queue:
@@ -424,7 +432,7 @@ async def rebroadcast_periodic(lead_id: str, title: str, **tick_ctx):
         f"🔄 <b>Заявка досі не взята!</b>\n"
         f"⏰ Повторна розсилка — будь ласка, візьміть в роботу!\n\n{title}"
     )
-    kb        = build_keyboard(lead_id)
+    kb        = build_broadcast_keyboard(lead_id)
     queue     = sorted_queue(exclude=get_skipped(lead_id), **tick_ctx)
     queue_set = set(queue)
     for mid in queue:
@@ -463,7 +471,7 @@ async def _send_next_queued_broadcast(**tick_ctx):
     orig_manager = waiting['manager_id']
     skipped      = get_skipped(waiting['lead_id'])
     text         = f"{waiting['title']}\n👤 <i>Відкрита черга</i>"
-    kb           = build_keyboard(waiting['lead_id'])
+    kb           = build_broadcast_keyboard(waiting['lead_id'])
     exclude      = list(set(skipped + ([orig_manager] if orig_manager else [])))
     queue        = sorted_queue(exclude=exclude, **tick_ctx)
 
