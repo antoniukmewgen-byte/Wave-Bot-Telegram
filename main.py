@@ -245,6 +245,17 @@ async def _handle_lead_event(event: dict):
             await remove_from_others(lead_id, note="🗑 Заявку видалено в CRM")
             schedule_cleanup(lead_id)
             logger.info(f"Webhook: заявка {lead_id} видалена в CRM → закрито в боті")
+
+        # Заявку могли видалити прямо зі статусу "Распределены" — цю гілку
+        # webhook'а вище (is_delete) не перетинається з логікою нижче, тому
+        # без цієї перевірки запис лишався б "привидом" у distributed_leads.
+        distributed_row = get_distributed_lead(lead_id)
+        if distributed_row:
+            logger.info(
+                f"Webhook: заявка {lead_id} видалена в CRM з 'Распределены' "
+                f"(менеджер {distributed_row['manager_id']})"
+            )
+            asyncio.create_task(on_lead_undistributed(lead_id, distributed_row['manager_id']))
         return
 
     # ── Заявка перейшла в статус "Распределены" ─────────────────────────────
