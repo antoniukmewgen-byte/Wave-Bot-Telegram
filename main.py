@@ -18,7 +18,7 @@ from config import (
     AMO_DISTRIBUTED_STATUS_ID, AMO_DISTRIBUTED_PIPELINE_ID,
 )
 from db import init_db, q, get_lead, get_manager, init_default_schedules, get_managers_dict, get_distributed_lead
-from kommo import make_lead_title, get_lead_responsible
+from kommo import make_lead_title, get_lead_responsible, get_lead_info
 from notifications import notify_admin_error, remove_from_others, schedule_cleanup
 from queue_logic import assign_next, scheduler_loop, deactivate_out_of_schedule, on_lead_distributed, on_lead_undistributed
 from sheets import warmup
@@ -231,11 +231,33 @@ async def _handle_lead_event(event: dict):
     # ── Змінили тільки відповідального (окрема категорія вебхука Kommo) ────
     # Не чіпаємо загальну логіку створення/закриття лідів — цікавить нас лише
     # випадок, коли лід лишається в 'Распределены', а власника переставили.
+    #
+    # ВАЖЛИВО: не довіряємо pipeline_id/status_id з тіла вебхука для цієї
+    # категорії — Kommo для 'responsible' може взагалі не присилати ці поля,
+    # через що перевірка мовчки провалювалась і distributed_leads лишався
+    # "привидом" назавжди. Тому тут завжди перепитуємо актуальний стан ліда
+    # напряму через API.
     if event.get('category') == 'responsible':
-        if (str(pipeline_id) == AMO_DISTRIBUTED_PIPELINE_ID
-                and str(status_id) == AMO_DISTRIBUTED_STATUS_ID):
+        info = await get_lead_info(lead_id)
+        actual_pipeline = str(info['pipeline_id']) if info else str(pipeline_id)
+        actual_status   = str(info['status_id'])   if info else str(status_id)
+
+        if (actual_pipeline == AMO_DISTRIBUTED_PIPELINE_ID
+                and actual_status == AMO_DISTRIBUTED_STATUS_ID):
             logger.info(f"Webhook: заявка {lead_id} — змінили відповідального (лишається в 'Распределены')")
             asyncio.create_task(on_lead_distributed(lead_id))
+            return
+
+        # Лід більше не в 'Распределены' (або вже перейшов далі) — якщо у нас
+        # все ще висить стара прив'язка в distributed_leads, звільняємо її,
+        # інакше менеджер назавжди лишиться поза чергою через "привида".
+        distributed_row = get_distributed_lead(lead_id)
+        if distributed_row:
+            logger.info(
+                f"Webhook: заявка {lead_id} — змінили відповідального, лід вже не в 'Распределены' "
+                f"(звільняємо {distributed_row['manager_id']})"
+            )
+            asyncio.create_task(on_lead_undistributed(lead_id, distributed_row['manager_id']))
         return
 
     if is_delete:

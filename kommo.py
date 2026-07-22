@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime
+from typing import Optional
 
 import aiohttp
 
@@ -50,6 +51,18 @@ async def get_lead_responsible(lead_id: str):
     Повертає responsible_user_id заявки з Kommo API.
     Використовується щоб визначити менеджера при отриманні webhook 'Распределены'.
     """
+    info = await get_lead_info(lead_id)
+    return info.get('responsible_user_id') if info else None
+
+
+async def get_lead_info(lead_id: str) -> Optional[dict]:
+    """
+    Повертає {responsible_user_id, status_id, pipeline_id} заявки напряму з Kommo API.
+
+    Навмисно НЕ покладаємось на pipeline_id/status_id з тіла вебхука —
+    для категорії 'responsible' Kommo може не присилати ці поля взагалі,
+    через що перевірка "лід досі в 'Распределены'" мовчки провалювалась би.
+    """
     if not AMO_TOKEN:
         return None
     url     = f"https://{AMO_SUBDOMAIN}.kommo.com/api/v4/leads/{lead_id}"
@@ -58,12 +71,16 @@ async def get_lead_responsible(lead_id: str):
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as resp:
                 if resp.status != 200:
-                    logger.error(f"get_lead_responsible: HTTP {resp.status} для заявки {lead_id}")
+                    logger.error(f"get_lead_info: HTTP {resp.status} для заявки {lead_id}")
                     return None
                 data = await resp.json()
-                return data.get('responsible_user_id')
+                return {
+                    'responsible_user_id': data.get('responsible_user_id'),
+                    'status_id':           data.get('status_id'),
+                    'pipeline_id':         data.get('pipeline_id'),
+                }
     except Exception as e:
-        logger.error(f"get_lead_responsible: {e}")
+        logger.error(f"get_lead_info: {e}")
         return None
 
 
