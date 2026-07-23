@@ -238,6 +238,18 @@ async def _handle_lead_event(event: dict):
     # "привидом" назавжди. Тому тут завжди перепитуємо актуальний стан ліда
     # напряму через API.
     if event.get('category') == 'responsible':
+        # Швидкий фільтр ще ДО звернення до API: якщо Kommo таки прислала
+        # pipeline_id у тілі вебхука і це точно не наша воронка (ні "гаряча",
+        # ні "Распределены") — заявка нас не стосується, виходимо одразу.
+        # Без цього фільтра масова зміна відповідального на чужих заявках
+        # (в іншій воронці, стороння дія в CRM) змушувала бота робити зайвий
+        # API-запит на КОЖНУ таку заявку без жодного тротлінгу — саме це
+        # спричинило шторм із ~1700 запитів і rate-limit/бан з боку Kommo.
+        # Якщо pipeline_id відсутній (Kommo для цієї категорії його іноді не
+        # присилає) — лишаємо стару поведінку і перевіряємо напряму через API.
+        if pipeline_id and str(pipeline_id) not in (AMO_PIPELINE_ID, AMO_DISTRIBUTED_PIPELINE_ID):
+            return
+
         info = await get_lead_info(lead_id)
         actual_pipeline = str(info['pipeline_id']) if info else str(pipeline_id)
         actual_status   = str(info['status_id'])   if info else str(status_id)
