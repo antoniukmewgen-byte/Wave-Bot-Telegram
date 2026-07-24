@@ -222,19 +222,20 @@ async def assign_next(lead_id: str, exclude: list[str] = None):
     if not lead:
         return
 
-    # Атомарно бронюємо заявку ПЕРЕД відправкою — захист від паралельних assign_next
-    if not claim_lead_for_send(lead_id, manager_id):
-        logger.info(f"assign_next: заявка {lead_id} вже зайнята іншим менеджером — пропускаємо")
-        return
-
-    # Свіжа перевірка прямо перед відправкою — за час між побудовою черги і сюди
+    # Свіжа перевірка прямо перед бронюванням — за час між побудовою черги і сюди
     # менеджер міг узяти іншу заявку в роботу (закриваємо вікно гонки).
+    # ВАЖЛИВО: цю перевірку треба робити ДО claim_lead_for_send, інакше вона
+    # рахує щойно заброньовану цю саму заявку як "pending" і завжди повертає False.
     if not _still_eligible(manager_id):
         logger.info(
             f"assign_next: {manager_name} ({manager_id}) став зайнятий за час побудови черги — "
-            f"повертаємо заявку {lead_id} в чергу"
+            f"пропускаємо, заявка {lead_id} лишається в черзі"
         )
-        q("UPDATE leads SET status='queued', manager_id=NULL, sent_at=NULL WHERE lead_id=?", (lead_id,))
+        return
+
+    # Атомарно бронюємо заявку ПЕРЕД відправкою — захист від паралельних assign_next
+    if not claim_lead_for_send(lead_id, manager_id):
+        logger.info(f"assign_next: заявка {lead_id} вже зайнята іншим менеджером — пропускаємо")
         return
 
     text = f"{lead['title']}\n👤 <i>Черга: {manager_name}</i>"
