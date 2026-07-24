@@ -66,6 +66,24 @@ def _build_sent_map() -> dict:
     return {r['manager_id']: r['cnt'] for r in rows} if rows else {}
 
 
+def _still_eligible(manager_id: str) -> bool:
+    """Свіжа перевірка прямо перед фактичною відправкою.
+
+    Списки черги (avail_map/sent_map) можуть бути знімком стану на початок тіку,
+    а сам тік обробляє кілька заявок підряд з await-надсиланнями між ними — за цей
+    час менеджер міг узяти іншу заявку в роботу (set_availability(False) з
+    handlers/manager.py). Ця перевірка закриває те вікно гонки: якщо менеджер
+    вже зайнятий/недоступний — не надсилаємо йому ще одну заявку.
+    """
+    if not is_available(manager_id):
+        return False
+    pending = q(
+        "SELECT COUNT(*) as cnt FROM leads WHERE status='sent' AND manager_id=?",
+        (manager_id,), fetch='one',
+    )
+    return not (pending and pending['cnt'] > 0)
+
+
 def build_manager_status_text(managers: dict) -> str:
     """
     Формує той самий текст, що і кнопка "👥 Статус менеджерів" в адмінці —
@@ -209,6 +227,16 @@ async def assign_next(lead_id: str, exclude: list[str] = None):
         logger.info(f"assign_next: заявка {lead_id} вже зайнята іншим менеджером — пропускаємо")
         return
 
+    # Свіжа перевірка прямо перед відправкою — за час між побудовою черги і сюди
+    # менеджер міг узяти іншу заявку в роботу (закриваємо вікно гонки).
+    if not _still_eligible(manager_id):
+        logger.info(
+            f"assign_next: {manager_name} ({manager_id}) став зайнятий за час побудови черги — "
+            f"повертаємо заявку {lead_id} в чергу"
+        )
+        q("UPDATE leads SET status='queued', manager_id=NULL, sent_at=NULL WHERE lead_id=?", (lead_id,))
+        return
+
     text = f"{lead['title']}\n👤 <i>Черга: {manager_name}</i>"
     try:
         await send_to(manager_id, lead_id, text, build_keyboard(lead_id))
@@ -319,6 +347,8 @@ async def broadcast_to_all(lead_id: str, **tick_ctx):
         await delete_and_send(orig_manager, lead_id, text, kb)
 
     for mid in queue:
+        if not _still_eligible(mid):
+            continue
         await delete_and_send(mid, lead_id, text, kb)
 
     q("UPDATE leads SET status='broadcast', esc_level=1, sent_at=? WHERE lead_id=?",
@@ -397,6 +427,8 @@ async def escalate_warn(lead_id: str, title: str, **tick_ctx):
     queue     = sorted_queue(exclude=get_skipped(lead_id), **tick_ctx)
     queue_set = set(queue)
     for mid in queue:
+        if not _still_eligible(mid):
+            continue
         await delete_and_send(mid, lead_id, warn, kb)
     for coro in _update_offline(queue_set, lead_id, warn):
         await coro
@@ -416,6 +448,8 @@ async def escalate_sos(lead_id: str, title: str, **tick_ctx):
     queue     = sorted_queue(exclude=get_skipped(lead_id), **tick_ctx)
     queue_set = set(queue)
     for mid in queue:
+        if not _still_eligible(mid):
+            continue
         await delete_and_send(mid, lead_id, sos, kb)
     for coro in _update_offline(queue_set, lead_id, sos):
         await coro
@@ -436,6 +470,8 @@ async def rebroadcast_periodic(lead_id: str, title: str, **tick_ctx):
     queue     = sorted_queue(exclude=get_skipped(lead_id), **tick_ctx)
     queue_set = set(queue)
     for mid in queue:
+        if not _still_eligible(mid):
+            continue
         await delete_and_send(mid, lead_id, msg, kb)
     for coro in _update_offline(queue_set, lead_id, msg):
         await coro
