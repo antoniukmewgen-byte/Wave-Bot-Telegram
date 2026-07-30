@@ -11,6 +11,34 @@ from notifications import remove_from_others
 
 logger = logging.getLogger(__name__)
 
+_session: Optional[aiohttp.ClientSession] = None
+_session_lock = asyncio.Lock()
+
+
+async def _get_session() -> aiohttp.ClientSession:
+    """Повертає спільну ClientSession (лінива ініціалізація, потокобезпечно).
+
+    Раніше кожен виклик до Kommo відкривав нову сесію/з'єднання — при масовому
+    напливі запитів (див. шторм ~1700 запитів) це множило TCP-з'єднання без
+    потреби. TCPConnector(limit=20) додатково обмежує паралелізм як
+    захист-в-глибину, навіть якщо вище по стеку тротлінг колись знову проламається.
+    """
+    global _session
+    if _session is None or _session.closed:
+        async with _session_lock:
+            if _session is None or _session.closed:
+                _session = aiohttp.ClientSession(
+                    connector=aiohttp.TCPConnector(limit=20)
+                )
+    return _session
+
+
+async def close_session():
+    global _session
+    if _session is not None and not _session.closed:
+        await _session.close()
+    _session = None
+
 
 def make_lead_title(status_id: str, lead_id: str) -> str:
     raw_label = HOT_STATUSES.get(str(status_id), 'Нова заявка')
@@ -31,16 +59,16 @@ async def get_kommo_users() -> list:
     url     = f"https://{AMO_SUBDOMAIN}.kommo.com/api/v4/users"
     headers = {"Authorization": f"Bearer {AMO_TOKEN}"}
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as resp:
-                if resp.status != 200:
-                    logger.error(f"get_kommo_users: HTTP {resp.status}")
-                    return []
-                data = await resp.json()
-                return [
-                    {'id': u['id'], 'name': u['name']}
-                    for u in data.get('_embedded', {}).get('users', [])
-                ]
+        session = await _get_session()
+        async with session.get(url, headers=headers) as resp:
+            if resp.status != 200:
+                logger.error(f"get_kommo_users: HTTP {resp.status}")
+                return []
+            data = await resp.json()
+            return [
+                {'id': u['id'], 'name': u['name']}
+                for u in data.get('_embedded', {}).get('users', [])
+            ]
     except Exception as e:
         logger.error(f"get_kommo_users: {e}")
         return []
@@ -68,17 +96,17 @@ async def get_lead_info(lead_id: str) -> Optional[dict]:
     url     = f"https://{AMO_SUBDOMAIN}.kommo.com/api/v4/leads/{lead_id}"
     headers = {"Authorization": f"Bearer {AMO_TOKEN}"}
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as resp:
-                if resp.status != 200:
-                    logger.error(f"get_lead_info: HTTP {resp.status} для заявки {lead_id}")
-                    return None
-                data = await resp.json()
-                return {
-                    'responsible_user_id': data.get('responsible_user_id'),
-                    'status_id':           data.get('status_id'),
-                    'pipeline_id':         data.get('pipeline_id'),
-                }
+        session = await _get_session()
+        async with session.get(url, headers=headers) as resp:
+            if resp.status != 200:
+                logger.error(f"get_lead_info: HTTP {resp.status} для заявки {lead_id}")
+                return None
+            data = await resp.json()
+            return {
+                'responsible_user_id': data.get('responsible_user_id'),
+                'status_id':           data.get('status_id'),
+                'pipeline_id':         data.get('pipeline_id'),
+            }
     except Exception as e:
         logger.error(f"get_lead_info: {e}")
         return None
@@ -94,14 +122,14 @@ async def set_kommo_responsible(lead_id: str, manager_id: str) -> bool:
     payload = [{"id": int(lead_id), "responsible_user_id": kommo_user_id}]
     headers = {"Authorization": f"Bearer {AMO_TOKEN}", "Content-Type": "application/json"}
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.patch(url, json=payload, headers=headers) as resp:
-                if resp.status not in (200, 202, 204):
-                    body = await resp.text()
-                    logger.error(f"Kommo responsible: HTTP {resp.status} для заявки {lead_id} | {body[:200]}")
-                    return False
-                logger.info(f"Kommo responsible: заявка {lead_id} → менеджер {kommo_user_id}")
-                return True
+        session = await _get_session()
+        async with session.patch(url, json=payload, headers=headers) as resp:
+            if resp.status not in (200, 202, 204):
+                body = await resp.text()
+                logger.error(f"Kommo responsible: HTTP {resp.status} для заявки {lead_id} | {body[:200]}")
+                return False
+            logger.info(f"Kommo responsible: заявка {lead_id} → менеджер {kommo_user_id}")
+            return True
     except Exception as e:
         logger.error(f"Kommo responsible: помилка для заявки {lead_id} | {e}")
         return False
@@ -119,67 +147,67 @@ async def sync_from_kommo() -> tuple[int, int, int]:
     page     = 1
     kommo_ids: set[str] = set()
 
-    async with aiohttp.ClientSession() as session:
-        while True:
-            params = {
-                "filter[statuses][0][pipeline_id]": AMO_PIPELINE_ID,
-                "filter[statuses][0][status_id]":   AMO_HOT_STATUS_ID,
-                "limit": 250,
-                "page":  page,
-            }
-            retry_count = 0
-            while retry_count < 3:
-                async with session.get(url, headers=headers, params=params) as resp:
-                    if resp.status == 204:
-                        page = -1  # сигнал виходу з зовнішнього циклу
-                        break
-                    if resp.status == 429:
-                        retry_after = int(resp.headers.get('Retry-After', 5))
-                        logger.warning(f"Kommo sync: rate limit — чекаємо {retry_after}с (спроба {retry_count + 1}/3)")
-                        await asyncio.sleep(retry_after)
-                        retry_count += 1
+    session = await _get_session()
+    while True:
+        params = {
+            "filter[statuses][0][pipeline_id]": AMO_PIPELINE_ID,
+            "filter[statuses][0][status_id]":   AMO_HOT_STATUS_ID,
+            "limit": 250,
+            "page":  page,
+        }
+        retry_count = 0
+        while retry_count < 3:
+            async with session.get(url, headers=headers, params=params) as resp:
+                if resp.status == 204:
+                    page = -1  # сигнал виходу з зовнішнього циклу
+                    break
+                if resp.status == 429:
+                    retry_after = int(resp.headers.get('Retry-After', 5))
+                    logger.warning(f"Kommo sync: rate limit — чекаємо {retry_after}с (спроба {retry_count + 1}/3)")
+                    await asyncio.sleep(retry_after)
+                    retry_count += 1
+                    continue
+                if resp.status >= 500:
+                    logger.error(f"Kommo sync: server error HTTP {resp.status} (спроба {retry_count + 1}/3)")
+                    await asyncio.sleep(2 ** retry_count)
+                    retry_count += 1
+                    continue
+                if resp.status != 200:
+                    logger.error(f"Kommo sync: HTTP {resp.status} — зупиняємо синхронізацію")
+                    page = -1
+                    break
+                data  = await resp.json()
+                leads = data.get("_embedded", {}).get("leads", [])
+                if not leads:
+                    page = -1
+                    break
+
+                for lead in leads:
+                    lead_id = str(lead["id"])
+                    kommo_ids.add(lead_id)
+                    if get_lead(lead_id):
+                        skipped += 1
                         continue
-                    if resp.status >= 500:
-                        logger.error(f"Kommo sync: server error HTTP {resp.status} (спроба {retry_count + 1}/3)")
-                        await asyncio.sleep(2 ** retry_count)
-                        retry_count += 1
-                        continue
-                    if resp.status != 200:
-                        logger.error(f"Kommo sync: HTTP {resp.status} — зупиняємо синхронізацію")
-                        page = -1
-                        break
-                    data  = await resp.json()
-                    leads = data.get("_embedded", {}).get("leads", [])
-                    if not leads:
-                        page = -1
-                        break
+                    title   = make_lead_title(AMO_HOT_STATUS_ID, lead_id)
+                    created = lead.get("created_at") or datetime.now().timestamp()
+                    try:
+                        q("INSERT INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
+                          (lead_id, "queued", created, title))
+                        added += 1
+                    except Exception as e:
+                        logger.error(f"Kommo sync: не вдалось додати {lead_id}: {e}")
 
-                    for lead in leads:
-                        lead_id = str(lead["id"])
-                        kommo_ids.add(lead_id)
-                        if get_lead(lead_id):
-                            skipped += 1
-                            continue
-                        title   = make_lead_title(AMO_HOT_STATUS_ID, lead_id)
-                        created = lead.get("created_at") or datetime.now().timestamp()
-                        try:
-                            q("INSERT INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
-                              (lead_id, "queued", created, title))
-                            added += 1
-                        except Exception as e:
-                            logger.error(f"Kommo sync: не вдалось додати {lead_id}: {e}")
+                if len(leads) < 250:
+                    page = -1
+                else:
+                    page += 1
+                break  # успішний запит — виходимо з retry циклу
+        else:
+            logger.error(f"Kommo sync: сторінка {page} не завантажена після 3 спроб — зупиняємо")
+            break
 
-                    if len(leads) < 250:
-                        page = -1
-                    else:
-                        page += 1
-                    break  # успішний запит — виходимо з retry циклу
-            else:
-                logger.error(f"Kommo sync: сторінка {page} не завантажена після 3 спроб — зупиняємо")
-                break
-
-            if page == -1:
-                break
+        if page == -1:
+            break
 
     active_rows = q(
         "SELECT lead_id FROM leads WHERE status NOT IN ('taken','duplicate','closed')",

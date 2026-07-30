@@ -357,6 +357,17 @@ async def broadcast_to_all(lead_id: str, **tick_ctx):
     logger.info(f"Заявка {lead_id} розіслана всім ({len(queue)} менеджерів)")
 
 
+def _escalation_text(lead) -> str:
+    """Текст ліда для повторного показу (відновлення кнопок) — залежить від esc_level."""
+    lvl = lead['esc_level']
+    if lvl <= 1:
+        return f"{lead['title']}\n👤 <i>Відкрита черга</i>"
+    elif lvl == 2:
+        return f"⚠️⚠️⚠️ <b>ТЕРМІНОВО!</b>\nЗаявка без відповіді!\n\n{lead['title']}"
+    else:
+        return f"🆘🚨💀🔴 <b>SOS!!!</b>\n\n{lead['title']}"
+
+
 async def restore_buttons_for_manager(manager_id: str):
     """Відновлює кнопки на активних лідах коли менеджер входить в чергу.
     Також надсилає broadcast заявки що вже активні але ще не приходили цьому менеджеру."""
@@ -370,13 +381,7 @@ async def restore_buttons_for_manager(manager_id: str):
     """, (manager_id,), fetch='all')
 
     for lead in (rows or []):
-        lvl = lead['esc_level']
-        if lvl <= 1:
-            text = f"{lead['title']}\n👤 <i>Відкрита черга</i>"
-        elif lvl == 2:
-            text = f"⚠️⚠️⚠️ <b>ТЕРМІНОВО!</b>\nЗаявка без відповіді!\n\n{lead['title']}"
-        else:
-            text = f"🆘🚨💀🔴 <b>SOS!!!</b>\n\n{lead['title']}"
+        text = _escalation_text(lead)
         await edit_msg(manager_id, lead['lead_id'], text, keyboard=build_keyboard(lead['lead_id']))
 
     # 2. Надсилаємо активні broadcast заявки що ще не приходили цьому менеджеру
@@ -393,13 +398,7 @@ async def restore_buttons_for_manager(manager_id: str):
     """, (manager_id, manager_id), fetch='all')
 
     for lead in (broadcast_leads or []):
-        lvl = lead['esc_level']
-        if lvl <= 1:
-            text = f"{lead['title']}\n👤 <i>Відкрита черга</i>"
-        elif lvl == 2:
-            text = f"⚠️⚠️⚠️ <b>ТЕРМІНОВО!</b>\nЗаявка без відповіді!\n\n{lead['title']}"
-        else:
-            text = f"🆘🚨💀🔴 <b>SOS!!!</b>\n\n{lead['title']}"
+        text = _escalation_text(lead)
         try:
             await send_to(manager_id, lead['lead_id'], text, build_broadcast_keyboard(lead['lead_id']))
             logger.info(f"restore: надіслано broadcast заявку {lead['lead_id']} → {manager_id}")
@@ -416,69 +415,64 @@ def _update_offline(queue_set: set, lead_id: str, text: str):
     ]
 
 
-async def escalate_warn(lead_id: str, title: str, **tick_ctx):
+async def _escalate(lead_id: str, text: str, sql: str, sql_params: tuple, log_msg: str, **tick_ctx):
+    """Спільна механіка розсилки для escalate_warn/escalate_sos/rebroadcast_periodic:
+    надіслати всій черзі, оновити офлайн-повідомлення без кнопок, записати новий стан."""
     lead = get_lead(lead_id)
     if not lead or lead['status'] in ('taken', 'duplicate', 'closed'):
         return
-    warn = (
+    kb        = build_broadcast_keyboard(lead_id)
+    queue     = sorted_queue(exclude=get_skipped(lead_id), **tick_ctx)
+    queue_set = set(queue)
+    for mid in queue:
+        if not _still_eligible(mid):
+            continue
+        await delete_and_send(mid, lead_id, text, kb)
+    for coro in _update_offline(queue_set, lead_id, text):
+        await coro
+    q(sql, sql_params)
+    logger.info(log_msg)
+
+
+async def escalate_warn(lead_id: str, title: str, **tick_ctx):
+    text = (
         f"⚠️⚠️⚠️ <b>ТЕРМІНОВО!</b>\n"
         f"Заявка вже <b>5 хвилин</b> без відповіді!\n\n{title}"
     )
-    kb        = build_broadcast_keyboard(lead_id)
-    queue     = sorted_queue(exclude=get_skipped(lead_id), **tick_ctx)
-    queue_set = set(queue)
-    for mid in queue:
-        if not _still_eligible(mid):
-            continue
-        await delete_and_send(mid, lead_id, warn, kb)
-    for coro in _update_offline(queue_set, lead_id, warn):
-        await coro
-    q("UPDATE leads SET esc_level=2 WHERE lead_id=?", (lead_id,))
-    logger.info(f"Заявка {lead_id}: 5-хвилинне попередження")
+    await _escalate(
+        lead_id, text,
+        "UPDATE leads SET esc_level=2 WHERE lead_id=?", (lead_id,),
+        f"Заявка {lead_id}: 5-хвилинне попередження",
+        **tick_ctx,
+    )
 
 
 async def escalate_sos(lead_id: str, title: str, **tick_ctx):
-    lead = get_lead(lead_id)
-    if not lead or lead['status'] in ('taken', 'duplicate', 'closed'):
-        return
-    sos = (
+    text = (
         f"🆘🚨💀🔴 <b>SOS!!! ЗАЯВКА 10 ХВИЛИН!!!</b> 🔴💀🚨🆘\n"
         f"😱🔥💥 ХТОСЬ ВІЗЬМІТЬ ВЖЕ! 💥🔥😱\n\n{title}"
     )
-    kb        = build_broadcast_keyboard(lead_id)
-    queue     = sorted_queue(exclude=get_skipped(lead_id), **tick_ctx)
-    queue_set = set(queue)
-    for mid in queue:
-        if not _still_eligible(mid):
-            continue
-        await delete_and_send(mid, lead_id, sos, kb)
-    for coro in _update_offline(queue_set, lead_id, sos):
-        await coro
-    now = datetime.now().timestamp()
-    q("UPDATE leads SET esc_level=3, last_rebroadcast_at=? WHERE lead_id=?", (now, lead_id))
-    logger.info(f"Заявка {lead_id}: SOS 10 хвилин")
+    await _escalate(
+        lead_id, text,
+        "UPDATE leads SET esc_level=3, last_rebroadcast_at=? WHERE lead_id=?",
+        (datetime.now().timestamp(), lead_id),
+        f"Заявка {lead_id}: SOS 10 хвилин",
+        **tick_ctx,
+    )
 
 
 async def rebroadcast_periodic(lead_id: str, title: str, **tick_ctx):
-    lead = get_lead(lead_id)
-    if not lead or lead['status'] in ('taken', 'duplicate', 'closed'):
-        return
-    msg = (
+    text = (
         f"🔄 <b>Заявка досі не взята!</b>\n"
         f"⏰ Повторна розсилка — будь ласка, візьміть в роботу!\n\n{title}"
     )
-    kb        = build_broadcast_keyboard(lead_id)
-    queue     = sorted_queue(exclude=get_skipped(lead_id), **tick_ctx)
-    queue_set = set(queue)
-    for mid in queue:
-        if not _still_eligible(mid):
-            continue
-        await delete_and_send(mid, lead_id, msg, kb)
-    for coro in _update_offline(queue_set, lead_id, msg):
-        await coro
-    q("UPDATE leads SET last_rebroadcast_at=? WHERE lead_id=?",
-      (datetime.now().timestamp(), lead_id))
-    logger.info(f"Заявка {lead_id}: повторна розсилка (кожні 30 хв)")
+    await _escalate(
+        lead_id, text,
+        "UPDATE leads SET last_rebroadcast_at=? WHERE lead_id=?",
+        (datetime.now().timestamp(), lead_id),
+        f"Заявка {lead_id}: повторна розсилка (кожні 30 хв)",
+        **tick_ctx,
+    )
 
 
 async def _send_next_queued_broadcast(**tick_ctx):
@@ -557,12 +551,10 @@ async def _tick():
             sent_at = lead['sent_at']
             last_rb = lead['last_rebroadcast_at']
 
+            last_rb_str = f"{int(now - last_rb)}s ago" if last_rb else "none"
             logger.debug(
                 f"_tick | lead={lid} status={lead['status']} esc={lvl} "
-                f"sent={'yes' if sent_at else 'no'} "
-                f"last_rb={int(now - last_rb)}s ago" if last_rb else
-                f"_tick | lead={lid} status={lead['status']} esc={lvl} "
-                f"sent={'yes' if sent_at else 'no'} last_rb=none"
+                f"sent={'yes' if sent_at else 'no'} last_rb={last_rb_str}"
             )
 
             if lead['status'] in ('queued', 'no_managers') and not sent_at:
@@ -609,6 +601,20 @@ async def _send_shift_reminder(manager_id: str, name: str):
         logger.warning(f"Schedule: не вдалось надіслати {manager_id}: {e}")
 
 
+def _shift_crosses_midnight(start: str, end: str) -> bool:
+    return end <= start
+
+
+def _in_shift(current_time: str, weekday: int, days: list[int], start: str, end: str) -> bool:
+    """Чи потрапляє current_time/weekday у робочу зміну [start, end).
+    Підтримує зміни, що переходять через північ (напр. 22:00–05:00)."""
+    yesterday = (weekday - 1) % 7
+    if _shift_crosses_midnight(start, end):
+        return (current_time >= start and weekday in days) or \
+               (current_time < end and yesterday in days)
+    return weekday in days and start <= current_time < end
+
+
 async def _check_schedules():
     """Надсилає нагадування на початку зміни та автоматично виводить з черги в кінці."""
     now          = datetime.now(_TZ)
@@ -625,7 +631,7 @@ async def _check_schedules():
         days      = [int(d) for d in sch['days'].split(',') if d.strip()]
         start     = sch.get('start_time', '16:00')
         end       = sch.get('end_time', '23:00')
-        crosses   = end <= start  # зміна переходить через північ (напр. 22:00–05:00)
+        crosses   = _shift_crosses_midnight(start, end)
 
         # ── Авто-деактивація в кінці зміни ──────────────────────────────────
         # Спрацьовує навіть якщо менеджер зараз поза чергою через 'has_distributed' —
@@ -691,7 +697,6 @@ async def deactivate_out_of_schedule():
     """При старті сервера виводить з черги менеджерів що зараз поза робочим часом."""
     now          = datetime.now(_TZ)
     weekday      = now.weekday()
-    yesterday    = (weekday - 1) % 7
     current_time = now.strftime('%H:%M')
 
     schedules = get_all_schedules()
@@ -704,15 +709,8 @@ async def deactivate_out_of_schedule():
         days    = [int(d) for d in sch['days'].split(',') if d.strip()]
         start   = sch.get('start_time', '16:00')
         end     = sch.get('end_time', '23:00')
-        crosses = end <= start  # зміна переходить через північ
 
-        if crosses:
-            in_shift = (current_time >= start and weekday in days) or \
-                       (current_time < end and yesterday in days)
-        else:
-            in_shift = weekday in days and start <= current_time < end
-
-        if not in_shift:
+        if not _in_shift(current_time, weekday, days, start, end):
             set_availability(manager_id, False, reason='schedule')
             await handle_manager_exit(manager_id)
             name = state.MANAGERS_BY_ID.get(manager_id, manager_id)
@@ -858,11 +856,11 @@ async def _release_reassigned_manager(lead_id: str, old_manager_id: str, new_man
         return
     name = mgr['sheet_name'] or mgr['tg_name'] or old_manager_id
 
-    row = q("SELECT exit_reason FROM availability WHERE manager_id=?", (old_manager_id,), fetch='one')
-    if row and row['exit_reason'] != 'has_distributed':
+    exit_reason = get_exit_reason(old_manager_id)
+    if exit_reason is not None and exit_reason != 'has_distributed':
         logger.info(
             f"on_lead_distributed (переприз.): {name} ({old_manager_id}) — не в черзі з іншої причини "
-            f"({row['exit_reason']}), не повертаємо"
+            f"({exit_reason}), не повертаємо"
         )
         return
 
@@ -907,11 +905,11 @@ async def on_lead_undistributed(lead_id: str, manager_id: str):
 
     # Повертаємо в чергу тільки якщо причина виходу саме 'has_distributed' —
     # якщо менеджер вийшов вручну або за розкладом поки заявка була distributed, не чіпаємо
-    row = q("SELECT exit_reason FROM availability WHERE manager_id=?", (manager_id,), fetch='one')
-    if row and row['exit_reason'] != 'has_distributed':
+    exit_reason = get_exit_reason(manager_id)
+    if exit_reason is not None and exit_reason != 'has_distributed':
         logger.info(
             f"on_lead_undistributed: {name} ({manager_id}) — не в черзі з іншої причини "
-            f"({row['exit_reason']}), не повертаємо"
+            f"({exit_reason}), не повертаємо"
         )
         return
 

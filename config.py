@@ -22,6 +22,10 @@ AMO_HOT_STATUS_ID          = os.environ.get('AMO_HOT_STATUS_ID', '85731907')
 AMO_DISTRIBUTED_STATUS_ID   = os.environ.get('AMO_DISTRIBUTED_STATUS_ID', '98056412')
 AMO_DISTRIBUTED_PIPELINE_ID = os.environ.get('AMO_DISTRIBUTED_PIPELINE_ID', '12703972')
 WEBHOOK_PATH   = os.environ.get('WEBHOOK_PATH', 'movenation')
+# Спільний секрет для перевірки вхідних вебхуків Kommo (?secret=... в URL).
+# Без нього /webhook/{WEBHOOK_PATH} приймає запити від БУДЬ-КОГО, хто дізнається шлях —
+# див. попередження при старті бота, якщо змінна не задана.
+WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', '').strip()
 SHEETS_ID      = _require('SHEETS_ID')
 SHEET_NAME     = os.environ.get('SHEET_NAME', 'План|Факт|Мотивація Мдж')
 GOOGLE_CREDS   = os.environ.get('GOOGLE_CREDS', 'google_creds.json')

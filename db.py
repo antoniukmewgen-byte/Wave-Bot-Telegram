@@ -21,6 +21,7 @@ def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -389,10 +390,6 @@ def init_default_schedules(managers_map: dict):
     Заповнює таблицю розкладів дефолтними значеннями якщо вони ще не задані.
     managers_map: {name: tg_id}
     """
-    DEFAULTS = {
-        '7083918297': ('0,1,2,3,6', '22:00', '05:00'),  # Льоша: пн-чт + нд, 22:00–05:00
-        '8762578305': ('0,1,2,4,5', '16:00', '23:00'),  # Федя:  пн-ср + пт-сб, 16:00–23:00
-    }
     DEFAULT_DAYS      = '0,1,2,3,4'
     DEFAULT_START     = '16:00'
     DEFAULT_END       = '23:00'
@@ -403,10 +400,9 @@ def init_default_schedules(managers_map: dict):
         for name, tg_id in managers_map.items():
             if tg_id in existing:
                 continue
-            days, start_time, end_time = DEFAULTS.get(tg_id, (DEFAULT_DAYS, DEFAULT_START, DEFAULT_END))
             c.execute(
                 "INSERT OR IGNORE INTO schedules (manager_id, days, start_time, end_time) VALUES (?,?,?,?)",
-                (tg_id, days, start_time, end_time),
+                (tg_id, DEFAULT_DAYS, DEFAULT_START, DEFAULT_END),
             )
 
 
