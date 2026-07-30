@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config import (
     WEBHOOK_PATH, WEBHOOK_SECRET,
@@ -37,6 +38,24 @@ def _webhook_authorized(request: Request) -> bool:
         return True
     provided = request.query_params.get('secret', '')
     return hmac.compare_digest(provided, WEBHOOK_SECRET)
+
+
+def _insert_lead_after_attempt(retry_state):
+    exc = retry_state.outcome.exception()
+    if exc is not None:
+        lead_id = retry_state.args[0]
+        logger.warning(f"Webhook: INSERT заявки {lead_id} спроба {retry_state.attempt_number}/3: {exc}")
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=0.5, min=0.5, max=2),
+    after=_insert_lead_after_attempt,
+    reraise=True,
+)
+async def _insert_lead_with_retry(lead_id: str, created_ts: float, title: str):
+    q("INSERT INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
+      (lead_id, 'queued', created_ts, title))
 
 
 def _extract_lead_events(data) -> list[dict]:
@@ -229,22 +248,11 @@ async def _handle_lead_event(event: dict):
     title = make_lead_title(status_id, lead_id)
 
     # Retry INSERT up to 3 times — a transient DB lock must not silently drop a lead
-    last_err: Exception = None
-    for attempt in range(3):
-        try:
-            q("INSERT INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
-              (lead_id, 'queued', datetime.now().timestamp(), title))
-            last_err = None
-            break
-        except Exception as e:
-            last_err = e
-            logger.warning(f"Webhook: INSERT заявки {lead_id} спроба {attempt + 1}/3: {e}")
-            if attempt < 2:
-                await asyncio.sleep(0.5 * (2 ** attempt))
-
-    if last_err:
-        logger.error(f"Webhook: не вдалось записати заявку {lead_id} після 3 спроб: {last_err}")
-        await notify_admin_error(f"webhook (запис заявки #{lead_id} в БД, 3 спроби)", last_err)
+    try:
+        await _insert_lead_with_retry(lead_id, datetime.now().timestamp(), title)
+    except Exception as e:
+        logger.error(f"Webhook: не вдалось записати заявку {lead_id} після 3 спроб: {e}")
+        await notify_admin_error(f"webhook (запис заявки #{lead_id} в БД, 3 спроби)", e)
         return
 
     asyncio.create_task(assign_next(lead_id))

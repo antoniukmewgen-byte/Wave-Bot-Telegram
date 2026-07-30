@@ -7,14 +7,14 @@ from telegram import BotCommand, BotCommandScopeAllGroupChats, MenuButtonCommand
 from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application, CallbackQueryHandler, CommandHandler,
-    ConversationHandler, MessageHandler, filters,
+    ConversationHandler, MessageHandler, PicklePersistence, filters,
 )
 
 import state
 from config import BOT_TOKEN
 from db import init_db, init_default_schedules, get_managers_dict
 from kommo import close_session as close_kommo_session
-from queue_logic import scheduler_loop, deactivate_out_of_schedule
+from queue_logic import build_scheduler, deactivate_out_of_schedule
 from sheets import warmup
 from webhook import router as webhook_router
 
@@ -52,6 +52,7 @@ async def lifespan(fastapi: FastAPI):
             connect_timeout=10,
             pool_timeout=10,
         ))
+        .persistence(PicklePersistence(filepath='bot_persistence.pkl'))
         .build()
     )
     app = state._app
@@ -67,6 +68,8 @@ async def lifespan(fastapi: FastAPI):
         fallbacks=[CommandHandler('start', on_start)],
         per_user=True,
         allow_reentry=True,
+        persistent=True,
+        name='registration_conversation',
     ))
 
     # ── Адміністративні колбеки (схвалення менеджерів тощо) ─────────────────
@@ -82,6 +85,8 @@ async def lifespan(fastapi: FastAPI):
         fallbacks=[CommandHandler('cancel', limits_cancel)],
         per_user=True,
         allow_reentry=True,
+        persistent=True,
+        name='limits_conversation',
     ))
 
     _sched_entry     = MessageHandler(filters.TEXT & filters.Regex(r'^⏰ Розклади$'), schedules_start)
@@ -97,6 +102,8 @@ async def lifespan(fastapi: FastAPI):
         fallbacks=[CommandHandler('cancel', schedules_cancel)],
         per_user=True,
         allow_reentry=True,
+        persistent=True,
+        name='schedules_conversation',
     ))
 
     app.add_handler(CallbackQueryHandler(
@@ -149,14 +156,17 @@ async def lifespan(fastapi: FastAPI):
 
     for coro, name in [
         (app.updater.start_polling(allowed_updates=Update.ALL_TYPES), 'polling'),
-        (scheduler_loop(), 'scheduler'),
         (_safe_deactivate(), 'deactivate_on_start'),
     ]:
         t = asyncio.create_task(coro, name=name)
         t.add_done_callback(_task_error_handler)
 
+    scheduler = build_scheduler()
+    scheduler.start()
+
     logger.info("Бот запущено")
     yield
+    scheduler.shutdown(wait=False)
     await app.updater.stop()
     await app.stop()
     await app.shutdown()

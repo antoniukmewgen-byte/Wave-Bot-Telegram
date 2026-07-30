@@ -5,6 +5,9 @@ from datetime import datetime, timedelta, timezone as _timezone
 # Єдина timezone для всього модуля (Київ, UTC+3)
 _TZ = _timezone(timedelta(hours=3))
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import Forbidden
 
@@ -736,34 +739,65 @@ async def _check_status_broadcast():
         await broadcast_manager_status()
 
 
-async def scheduler_loop():
-    _now_tz          = lambda: datetime.now(_TZ)
-    last_cleanup      = _now_tz().month
-    last_day          = _now_tz().day
-    last_sch_min      = ''
-    last_msg_cleanup  = _now_tz().timestamp()
-    while True:
-        await asyncio.sleep(SCHEDULER_TICK)
+def _scheduler_job(name: str, fn):
+    """Обгортає job-функцію try/except-ом, що логує і повідомляє адмінів —
+    той самий except Exception, що раніше був спільним для всього scheduler_loop()."""
+    async def _wrapped():
         try:
-            await _tick()
-            now = _now_tz()
-            if now.day != last_day:
-                _reset_limit_overrides()
-                last_day = now.day
-            if now.month != last_cleanup:
-                _cleanup_old_records()
-                last_cleanup = now.month
-            cur_min = now.strftime('%H:%M')
-            if cur_min != last_sch_min:
-                last_sch_min = cur_min
-                await _check_schedules()
-                await _check_status_broadcast()
-            if now.timestamp() - last_msg_cleanup >= 300:
-                await cleanup_stale_messages()
-                last_msg_cleanup = now.timestamp()
+            await fn()
         except Exception as e:
-            logger.error(f"Scheduler помилка: {e}")
-            await notify_admin_error("scheduler (фоновий планувальник)", e)
+            logger.error(f"Scheduler помилка ({name}): {e}")
+            await notify_admin_error(f"scheduler ({name})", e)
+    return _wrapped
+
+
+async def _run_minute_checks():
+    await _check_schedules()
+    await _check_status_broadcast()
+
+
+async def _run_daily_reset():
+    _reset_limit_overrides()
+
+
+async def _run_monthly_cleanup():
+    _cleanup_old_records()
+
+
+def build_scheduler() -> AsyncIOScheduler:
+    """AsyncIOScheduler-заміна для scheduler_loop(): той самий набір
+    періодичних задач (тик, денний/місячний rollover, щохвилинні перевірки,
+    чистка застарілих повідомлень), але через CronTrigger/IntervalTrigger
+    замість ручного відстеження зміни day/month/minute в одному циклі.
+    """
+    scheduler = AsyncIOScheduler(timezone=_TZ)
+
+    scheduler.add_job(
+        _scheduler_job('tick', _tick),
+        IntervalTrigger(seconds=SCHEDULER_TICK),
+        id='tick', max_instances=1,
+    )
+    scheduler.add_job(
+        _scheduler_job('daily_reset', _run_daily_reset),
+        CronTrigger(hour=0, minute=0, timezone=_TZ),
+        id='daily_reset', max_instances=1,
+    )
+    scheduler.add_job(
+        _scheduler_job('monthly_cleanup', _run_monthly_cleanup),
+        CronTrigger(day=1, hour=0, minute=0, timezone=_TZ),
+        id='monthly_cleanup', max_instances=1,
+    )
+    scheduler.add_job(
+        _scheduler_job('minute_checks', _run_minute_checks),
+        CronTrigger(second=0, timezone=_TZ),
+        id='minute_checks', max_instances=1,
+    )
+    scheduler.add_job(
+        _scheduler_job('stale_cleanup', cleanup_stale_messages),
+        IntervalTrigger(seconds=300),
+        id='stale_cleanup', max_instances=1,
+    )
+    return scheduler
 
 
 # ─── Розподілені заявки (Распределены) ───────────────────────────────────────

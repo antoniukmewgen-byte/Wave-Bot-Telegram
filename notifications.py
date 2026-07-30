@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+from tenacity import retry, retry_if_exception_type, stop_after_attempt
 from telegram.error import Forbidden, RetryAfter, TimedOut, NetworkError
 
 import state
@@ -84,23 +85,30 @@ async def _deactivate_blocked(manager_id: str):
     )
 
 
+def _tg_retry_wait(retry_state) -> float:
+    exc = retry_state.outcome.exception()
+    if isinstance(exc, RetryAfter):
+        return exc.retry_after + 1
+    return 2 ** (retry_state.attempt_number - 1)
+
+
+@retry(
+    retry=retry_if_exception_type((RetryAfter, TimedOut, NetworkError)),
+    wait=_tg_retry_wait,
+    stop=stop_after_attempt(3),
+    reraise=True,
+)
+async def _tg_retry_inner(coro_fn):
+    return await coro_fn()
+
+
 async def _tg_retry(coro_fn, manager_id: str):
     """3 спроби з exponential backoff (1s → 2s). Forbidden → деактивація і raise."""
-    last_err: Exception = None
-    for attempt in range(3):
-        try:
-            return await coro_fn()
-        except Forbidden:
-            await _deactivate_blocked(manager_id)
-            raise
-        except RetryAfter as e:
-            last_err = e
-            await asyncio.sleep(e.retry_after + 1)
-        except (TimedOut, NetworkError) as e:
-            last_err = e
-            if attempt < 2:
-                await asyncio.sleep(2 ** attempt)
-    raise last_err
+    try:
+        return await _tg_retry_inner(coro_fn)
+    except Forbidden:
+        await _deactivate_blocked(manager_id)
+        raise
 
 
 async def send_to(manager_id: str, lead_id: str, text: str, keyboard) -> int:

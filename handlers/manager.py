@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime
 
@@ -122,7 +123,7 @@ async def on_work_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if active:
         managers = await fetch_managers_async()
         if user_id not in managers:
-            reason = get_block_reason(user_id) or "❌ Ви не можете увійти в чергу. Зверніться до керівника."
+            reason = await asyncio.to_thread(get_block_reason, user_id) or "❌ Ви не можете увійти в чергу. Зверніться до керівника."
             await update.message.reply_text(reason, reply_markup=MANAGER_KB)
             set_availability(user_id, False, reason='blocked')
             return

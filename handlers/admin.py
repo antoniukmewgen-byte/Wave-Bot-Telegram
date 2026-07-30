@@ -34,6 +34,17 @@ ADMIN_KB = ReplyKeyboardMarkup(
 )
 
 
+def _render_table(headers: list, rows: list) -> str:
+    """Форматує headers+rows у моноширинну таблицю (для <pre> блоків)."""
+    col_w = [max(len(h), max((len(r[i]) for r in rows), default=0)) for i, h in enumerate(headers)]
+
+    def fmt(cols):
+        return " | ".join(c.ljust(w) for c, w in zip(cols, col_w))
+
+    sep = '-+-'.join('-' * w for w in col_w)
+    return f"{fmt(headers)}\n{sep}\n{chr(10).join(fmt(r) for r in rows)}"
+
+
 async def _handle_manager_status(message, managers: dict):
     await send_long(message, build_manager_status_text(managers))
 
@@ -150,30 +161,19 @@ async def _handle_daily_stats(message):
         return
 
     headers = ["Менеджер", "Заявка", "Взято о", "Реакція"]
-    col_w   = [max(len(h), max(len(r[i]) for r in table_rows)) for i, h in enumerate(headers)]
-
-    def fmt_row(cols):
-        return " | ".join(c.ljust(w) for c, w in zip(cols, col_w))
 
     summary_block = ""
     if summary_rows:
         s_headers = ["Менеджер", "Взято", "Сер. реакція"]
-        s_col_w   = [max(len(h), max(len(r[i]) for r in summary_rows)) for i, h in enumerate(s_headers)]
-        def fmt_s(cols):
-            return " | ".join(c.ljust(w) for c, w in zip(cols, s_col_w))
         summary_block = (
             f"\n\n📊 <b>По менеджерах:</b>\n"
-            f"<pre>{fmt_s(s_headers)}\n"
-            f"{'-+-'.join('-' * w for w in s_col_w)}\n"
-            f"{chr(10).join(fmt_s(r) for r in summary_rows)}</pre>"
+            f"<pre>{_render_table(s_headers, summary_rows)}</pre>"
         )
 
     await send_long(
         message,
         f"{header_line}\n\n"
-        f"<pre>{fmt_row(headers)}\n"
-        f"{'-+-'.join('-' * w for w in col_w)}\n"
-        f"{chr(10).join(fmt_row(r) for r in table_rows)}</pre>"
+        f"<pre>{_render_table(headers, table_rows)}</pre>"
         f"{summary_block}",
     )
 
@@ -216,18 +216,12 @@ async def _handle_monthly_stats(message):
 
     overall_avg = f"{int(sum(all_reactions)/len(all_reactions))} хв" if all_reactions else "—"
     m_headers   = ["Менеджер", "Взято", "Сер. реакція"]
-    m_col_w     = [max(len(h), max(len(r[i]) for r in m_rows)) for i, h in enumerate(m_headers)]
-
-    def fmt_m(cols):
-        return " | ".join(c.ljust(w) for c, w in zip(cols, m_col_w))
 
     await send_long(
         message,
         f"📆 <b>За місяць ({month_label})</b>\n"
         f"Взято: {total_taken} | Сер. реакція: {overall_avg}\n\n"
-        f"<pre>{fmt_m(m_headers)}\n"
-        f"{'-+-'.join('-' * w for w in m_col_w)}\n"
-        f"{chr(10).join(fmt_m(r) for r in m_rows)}</pre>",
+        f"<pre>{_render_table(m_headers, m_rows)}</pre>",
     )
 
 

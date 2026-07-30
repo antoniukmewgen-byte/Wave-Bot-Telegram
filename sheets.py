@@ -62,6 +62,84 @@ _cache_ts: float = 0.0
 _rows_cache: list = []
 _lock = threading.Lock()
 
+# Ключові слова, які очікуємо побачити в заголовку кожної колонки (нижній регістр).
+# Джерело — коментарі біля COL_* у config.py. Використовується лише для
+# діагностичного попередження в лог, якщо структура таблиці зміниться
+# (зсув/перейменування колонок) — саму логіку парсингу не змінює.
+_EXPECTED_HEADER_KEYWORDS = {
+    COL_PLAN:       ('план', 'обіг'),
+    COL_HOT_TAKEN:  ('гарячих', 'лідів'),
+    COL_PAYMENTS:   ('проданих', 'консультацій'),
+    COL_CONVERSION: ('конверсія',),
+}
+_header_warned: set = set()
+
+
+def _validate_header_row(rows: list) -> None:
+    """Звіряє текст заголовків з очікуваними ключовими словами.
+
+    Лише пише warning у лог (раз на колонку за час роботи процесу) —
+    не впливає на результат парсингу. Дозволяє помітити, що хтось змінив
+    структуру Google Sheets, замість мовчазного неправильного розбору даних.
+    """
+    if not rows:
+        return
+    header = rows[0]
+    for col_idx, keywords in _EXPECTED_HEADER_KEYWORDS.items():
+        if col_idx in _header_warned:
+            continue
+        if col_idx >= len(header):
+            logger.warning(f"Sheets: заголовок колонки {col_idx} відсутній (очікували ключові слова {keywords})")
+            _header_warned.add(col_idx)
+            continue
+        header_text = header[col_idx].strip().lower()
+        if not all(kw in header_text for kw in keywords):
+            logger.warning(
+                f"Sheets: заголовок колонки {col_idx} ('{header[col_idx]}') не містить "
+                f"очікуваних слів {keywords} — можливо, стовпці таблиці змінились"
+            )
+            _header_warned.add(col_idx)
+
+
+def _int_col(row: list, idx: int) -> int:
+    if len(row) <= idx:
+        return 0
+    try:
+        return int(float(row[idx].strip().replace(' ', '').replace('\xa0', '') or '0'))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _float_percent_col(row: list, idx: int) -> float:
+    if len(row) <= idx:
+        return 0.0
+    raw = row[idx].strip().replace('%', '').replace(',', '.').replace(' ', '').replace('\xa0', '')
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _has_plan(row: list) -> bool:
+    if len(row) <= COL_PLAN:
+        return False
+    plan_raw = row[COL_PLAN].strip().replace(' ', '').replace('\xa0', '').replace('$', '').replace(',', '')
+    return bool(plan_raw) and plan_raw != '0'
+
+
+def _row_matches_period(row: list, year_str: str, month_str: str) -> bool:
+    if len(row) <= COL_CONVERSION:
+        return False
+    return row[COL_YEAR].strip() == year_str and row[COL_MONTH].strip() == month_str
+
+
+def _sheet_name_to_tg_id() -> Dict[str, str]:
+    return {
+        r['sheet_name']: r['tg_id']
+        for r in get_all_managers(approved_only=True)
+        if r['sheet_name']
+    }
+
 
 def _read_rows() -> list:
     """Читає всі рядки з кешованим підключенням."""
@@ -72,6 +150,7 @@ def _read_rows() -> list:
     except Exception:
         ws = _reconnect()
         _rows_cache = ws.get('A1:AK200', value_render_option='FORMATTED_VALUE') or []
+    _validate_header_row(_rows_cache)
     return _rows_cache
 
 
@@ -101,28 +180,12 @@ def fetch_managers() -> Dict[str, dict]:
             year_str  = str(now_dt.year)
             month_str = MONTHS_UA[now_dt.month]
 
-            def _int_col(row: list, idx: int) -> int:
-                if len(row) <= idx:
-                    return 0
-                try:
-                    return int(float(row[idx].strip().replace(' ', '').replace('\xa0', '') or '0'))
-                except (ValueError, TypeError):
-                    return 0
-
             # Завантажуємо всіх менеджерів одним запитом → O(1) lookup у циклі
-            sheet_name_to_id: Dict[str, str] = {
-                r['sheet_name']: r['tg_id']
-                for r in get_all_managers(approved_only=True)
-                if r['sheet_name']
-            }
+            sheet_name_to_id = _sheet_name_to_tg_id()
 
             result: Dict[str, dict] = {}
             for row in rows[1:]:
-                if len(row) <= COL_CONVERSION:
-                    continue
-                if row[COL_YEAR].strip() != year_str:
-                    continue
-                if row[COL_MONTH].strip() != month_str:
+                if not _row_matches_period(row, year_str, month_str):
                     continue
 
                 name  = row[COL_MANAGER].strip()
@@ -130,20 +193,13 @@ def fetch_managers() -> Dict[str, dict]:
                 if not tg_id:
                     continue
 
-                raw = (row[COL_CONVERSION].strip()
-                       .replace('%', '').replace(',', '.').replace(' ', '').replace('\xa0', ''))
-                try:
-                    conv = float(raw)
-                except (ValueError, TypeError):
-                    conv = 0.0
+                # Якщо колонка W (План обіг) порожня — менеджер поза чергою
+                if not _has_plan(row):
+                    continue
 
+                conv      = _float_percent_col(row, COL_CONVERSION)
                 payments  = _int_col(row, COL_PAYMENTS)
                 hot_taken = _int_col(row, COL_HOT_TAKEN)
-
-                # Якщо колонка W (План обіг) порожня — менеджер поза чергою
-                plan_raw = row[COL_PLAN].strip().replace(' ', '').replace('\xa0', '').replace('$', '').replace(',', '') if len(row) > COL_PLAN else ''
-                if not plan_raw or plan_raw == '0':
-                    continue
 
                 if payments == 0:
                     # Гілка «0 оплат» — ліміт за к-тю взятих лідів
@@ -212,43 +268,22 @@ def get_block_reason(tg_id: str) -> Optional[str]:
         year_str = str(now_dt.year)
         month_str = MONTHS_UA[now_dt.month]
 
-        sheet_to_id: Dict[str, str] = {
-            r['sheet_name']: r['tg_id']
-            for r in get_all_managers(approved_only=True)
-            if r['sheet_name']
-        }
+        sheet_to_id = _sheet_name_to_tg_id()
 
         for row in rows[1:]:
-            if len(row) <= COL_CONVERSION:
-                continue
-            if row[COL_YEAR].strip() != year_str:
-                continue
-            if row[COL_MONTH].strip() != month_str:
+            if not _row_matches_period(row, year_str, month_str):
                 continue
 
             name = row[COL_MANAGER].strip()
             if sheet_to_id.get(name) != tg_id:
                 continue
 
-            plan_raw = row[COL_PLAN].strip().replace(' ', '').replace('\xa0', '').replace('$', '').replace(',', '') if len(row) > COL_PLAN else ''
-            if not plan_raw or plan_raw == '0':
+            if not _has_plan(row):
                 return "❌ Вам не встановлено план обігу (колонка W порожня). Зверніться до керівника."
 
-            raw = row[COL_CONVERSION].strip().replace('%', '').replace(',', '.').replace(' ', '').replace('\xa0', '')
-            try:
-                conv = float(raw)
-            except (ValueError, TypeError):
-                conv = 0.0
-
-            try:
-                payments = int(float(row[COL_PAYMENTS].strip().replace(' ', '').replace('\xa0', '') or '0')) if len(row) > COL_PAYMENTS else 0
-            except (ValueError, TypeError):
-                payments = 0
-
-            try:
-                hot_taken = int(float(row[COL_HOT_TAKEN].strip().replace(' ', '').replace('\xa0', '') or '0')) if len(row) > COL_HOT_TAKEN else 0
-            except (ValueError, TypeError):
-                hot_taken = 0
+            conv      = _float_percent_col(row, COL_CONVERSION)
+            payments  = _int_col(row, COL_PAYMENTS)
+            hot_taken = _int_col(row, COL_HOT_TAKEN)
 
             if payments == 0:
                 if hot_taken > LEADS_MAX2_MAX:

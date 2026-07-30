@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Optional
 
 import aiohttp
+from tenacity import retry, retry_if_exception_type, stop_after_attempt
 
 from config import AMO_SUBDOMAIN, AMO_TOKEN, AMO_PIPELINE_ID, AMO_HOT_STATUS_ID, HOT_STATUSES
 from db import q, get_lead, get_manager
@@ -135,6 +136,59 @@ async def set_kommo_responsible(lead_id: str, manager_id: str) -> bool:
         return False
 
 
+class _KommoRateLimited(Exception):
+    def __init__(self, retry_after: int):
+        self.retry_after = retry_after
+
+
+class _KommoServerError(Exception):
+    def __init__(self, status: int):
+        self.status = status
+
+
+class _KommoFatalError(Exception):
+    """Неретраюча помилка — синхронізацію треба зупинити негайно, без повторів."""
+    def __init__(self, status: int):
+        self.status = status
+
+
+def _kommo_retry_wait(retry_state) -> float:
+    exc = retry_state.outcome.exception()
+    if isinstance(exc, _KommoRateLimited):
+        return exc.retry_after
+    return 2 ** (retry_state.attempt_number - 1)
+
+
+def _kommo_before_sleep(retry_state):
+    exc     = retry_state.outcome.exception()
+    attempt = retry_state.attempt_number
+    if isinstance(exc, _KommoRateLimited):
+        logger.warning(f"Kommo sync: rate limit — чекаємо {exc.retry_after}с (спроба {attempt}/3)")
+    else:
+        logger.error(f"Kommo sync: server error HTTP {exc.status} (спроба {attempt}/3)")
+
+
+@retry(
+    retry=retry_if_exception_type((_KommoRateLimited, _KommoServerError)),
+    wait=_kommo_retry_wait,
+    stop=stop_after_attempt(3),
+    before_sleep=_kommo_before_sleep,
+    reraise=True,
+)
+async def _fetch_leads_page(session, url, headers, params) -> Optional[dict]:
+    """Один запит сторінки лідів. None означає HTTP 204 (природний кінець пагінації)."""
+    async with session.get(url, headers=headers, params=params) as resp:
+        if resp.status == 204:
+            return None
+        if resp.status == 429:
+            raise _KommoRateLimited(int(resp.headers.get('Retry-After', 5)))
+        if resp.status >= 500:
+            raise _KommoServerError(resp.status)
+        if resp.status != 200:
+            raise _KommoFatalError(resp.status)
+        return await resp.json()
+
+
 async def sync_from_kommo() -> tuple[int, int, int]:
     if not AMO_TOKEN:
         return 0, 0, 0
@@ -155,59 +209,40 @@ async def sync_from_kommo() -> tuple[int, int, int]:
             "limit": 250,
             "page":  page,
         }
-        retry_count = 0
-        while retry_count < 3:
-            async with session.get(url, headers=headers, params=params) as resp:
-                if resp.status == 204:
-                    page = -1  # сигнал виходу з зовнішнього циклу
-                    break
-                if resp.status == 429:
-                    retry_after = int(resp.headers.get('Retry-After', 5))
-                    logger.warning(f"Kommo sync: rate limit — чекаємо {retry_after}с (спроба {retry_count + 1}/3)")
-                    await asyncio.sleep(retry_after)
-                    retry_count += 1
-                    continue
-                if resp.status >= 500:
-                    logger.error(f"Kommo sync: server error HTTP {resp.status} (спроба {retry_count + 1}/3)")
-                    await asyncio.sleep(2 ** retry_count)
-                    retry_count += 1
-                    continue
-                if resp.status != 200:
-                    logger.error(f"Kommo sync: HTTP {resp.status} — зупиняємо синхронізацію")
-                    page = -1
-                    break
-                data  = await resp.json()
-                leads = data.get("_embedded", {}).get("leads", [])
-                if not leads:
-                    page = -1
-                    break
-
-                for lead in leads:
-                    lead_id = str(lead["id"])
-                    kommo_ids.add(lead_id)
-                    if get_lead(lead_id):
-                        skipped += 1
-                        continue
-                    title   = make_lead_title(AMO_HOT_STATUS_ID, lead_id)
-                    created = lead.get("created_at") or datetime.now().timestamp()
-                    try:
-                        q("INSERT INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
-                          (lead_id, "queued", created, title))
-                        added += 1
-                    except Exception as e:
-                        logger.error(f"Kommo sync: не вдалось додати {lead_id}: {e}")
-
-                if len(leads) < 250:
-                    page = -1
-                else:
-                    page += 1
-                break  # успішний запит — виходимо з retry циклу
-        else:
+        try:
+            data = await _fetch_leads_page(session, url, headers, params)
+        except _KommoFatalError as e:
+            logger.error(f"Kommo sync: HTTP {e.status} — зупиняємо синхронізацію")
+            break
+        except (_KommoRateLimited, _KommoServerError):
             logger.error(f"Kommo sync: сторінка {page} не завантажена після 3 спроб — зупиняємо")
             break
 
-        if page == -1:
+        if data is None:
+            break  # HTTP 204 — природний кінець пагінації
+
+        leads = data.get("_embedded", {}).get("leads", [])
+        if not leads:
             break
+
+        for lead in leads:
+            lead_id = str(lead["id"])
+            kommo_ids.add(lead_id)
+            if get_lead(lead_id):
+                skipped += 1
+                continue
+            title   = make_lead_title(AMO_HOT_STATUS_ID, lead_id)
+            created = lead.get("created_at") or datetime.now().timestamp()
+            try:
+                q("INSERT INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
+                  (lead_id, "queued", created, title))
+                added += 1
+            except Exception as e:
+                logger.error(f"Kommo sync: не вдалось додати {lead_id}: {e}")
+
+        if len(leads) < 250:
+            break
+        page += 1
 
     active_rows = q(
         "SELECT lead_id FROM leads WHERE status NOT IN ('taken','duplicate','closed')",

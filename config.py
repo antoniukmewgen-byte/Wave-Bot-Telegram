@@ -62,10 +62,6 @@ LEADS_MAX2_MAX   = 30    # 21 – 30        → max 2
 MAX_LEADS_5      = 10
 MAX_LEADS_2      = 5
 
-# backward-compat aliases
-CONV_LIMITED_MIN = CONV_MAX5_MIN
-MAX_LEADS_MID    = MAX_LEADS_5
-
 HOT_STATUSES = {
     '85731907':  'Гаряча заявка 🔥',
     '104159672': 'Кваліфікована заявка ⭐',
