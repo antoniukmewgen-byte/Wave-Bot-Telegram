@@ -772,7 +772,7 @@ def build_scheduler() -> AsyncIOScheduler:
 
     scheduler.add_job(
         _scheduler_job('tick', _tick),
-        IntervalTrigger(seconds=SCHEDULER_TICK),
+        IntervalTrigger(seconds=SCHEDULER_TICK, timezone=_TZ),
         id='tick', max_instances=1,
     )
     scheduler.add_job(
@@ -792,7 +792,7 @@ def build_scheduler() -> AsyncIOScheduler:
     )
     scheduler.add_job(
         _scheduler_job('stale_cleanup', cleanup_stale_messages),
-        IntervalTrigger(seconds=300),
+        IntervalTrigger(seconds=300, timezone=_TZ),
         id='stale_cleanup', max_instances=1,
     )
     return scheduler
