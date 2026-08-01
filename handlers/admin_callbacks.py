@@ -23,7 +23,7 @@ async def on_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     action, tg_id = query.data.split(':', 1)
 
-    mgr = get_manager(tg_id)
+    mgr = await get_manager(tg_id)
     if not mgr:
         await query.edit_message_text("⚠️ Менеджера не знайдено в БД (можливо вже оброблено)")
         return
@@ -31,12 +31,12 @@ async def on_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = mgr['sheet_name'] or mgr['tg_name'] or tg_id
 
     if action == 'mgr_approve':
-        approve_manager(tg_id)
+        await approve_manager(tg_id)
         # Ініціалізуємо розклад якщо немає
         from db import init_default_schedules
-        init_default_schedules({name: tg_id})
+        await init_default_schedules({name: tg_id})
         # Оновлюємо runtime словник
-        state.reload_managers()
+        await state.reload_managers()
 
         await query.edit_message_text(
             f"✅ Менеджера <b>{name}</b> схвалено та додано до системи.",
@@ -64,7 +64,7 @@ async def on_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif action == 'mgr_reject':
-        delete_manager(tg_id)
+        await delete_manager(tg_id)
 
         await query.edit_message_text(
             f"❌ Реєстрацію <b>{name}</b> відхилено та видалено.",

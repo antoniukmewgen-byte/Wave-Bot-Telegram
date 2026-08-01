@@ -12,7 +12,8 @@ import db
 
 
 @pytest.fixture
-def temp_db(tmp_path, monkeypatch):
+async def temp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'test_leads.db'))
-    db.init_db()
+    await db.init_db()
     yield db
+    await db.close_db()

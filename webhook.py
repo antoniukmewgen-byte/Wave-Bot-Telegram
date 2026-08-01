@@ -54,7 +54,7 @@ def _insert_lead_after_attempt(retry_state):
     reraise=True,
 )
 async def _insert_lead_with_retry(lead_id: str, created_ts: float, title: str):
-    q("INSERT INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
+    await q("INSERT INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
       (lead_id, 'queued', created_ts, title))
 
 
@@ -155,7 +155,7 @@ async def _handle_lead_event(event: dict):
         # Лід більше не в 'Распределены' (або вже перейшов далі) — якщо у нас
         # все ще висить стара прив'язка в distributed_leads, звільняємо її,
         # інакше менеджер назавжди лишиться поза чергою через "привида".
-        distributed_row = get_distributed_lead(lead_id)
+        distributed_row = await get_distributed_lead(lead_id)
         if distributed_row:
             logger.info(
                 f"Webhook: заявка {lead_id} — змінили відповідального, лід вже не в 'Распределены' "
@@ -165,9 +165,9 @@ async def _handle_lead_event(event: dict):
         return
 
     if is_delete:
-        lead = get_lead(lead_id)
+        lead = await get_lead(lead_id)
         if lead and lead['status'] not in ('taken', 'duplicate', 'closed'):
-            q("UPDATE leads SET status='closed' WHERE lead_id=?", (lead_id,))
+            await q("UPDATE leads SET status='closed' WHERE lead_id=?", (lead_id,))
             await remove_from_others(lead_id, note="🗑 Заявку видалено в CRM")
             schedule_cleanup(lead_id)
             logger.info(f"Webhook: заявка {lead_id} видалена в CRM → закрито в боті")
@@ -175,7 +175,7 @@ async def _handle_lead_event(event: dict):
         # Заявку могли видалити прямо зі статусу "Распределены" — цю гілку
         # webhook'а вище (is_delete) не перетинається з логікою нижче, тому
         # без цієї перевірки запис лишався б "привидом" у distributed_leads.
-        distributed_row = get_distributed_lead(lead_id)
+        distributed_row = await get_distributed_lead(lead_id)
         if distributed_row:
             logger.info(
                 f"Webhook: заявка {lead_id} видалена в CRM з 'Распределены' "
@@ -192,7 +192,7 @@ async def _handle_lead_event(event: dict):
         return
 
     # ── Заявка покинула статус "Распределены" ───────────────────────────────
-    distributed_row = get_distributed_lead(lead_id)
+    distributed_row = await get_distributed_lead(lead_id)
     if distributed_row:
         should_release = True
 
@@ -210,7 +210,7 @@ async def _handle_lead_event(event: dict):
             from db import get_manager
 
             current_kommo_id = await get_lead_responsible(lead_id)
-            tracked_mgr      = get_manager(distributed_row['manager_id'])
+            tracked_mgr      = await get_manager(distributed_row['manager_id'])
             tracked_kommo_id = tracked_mgr['kommo_id'] if tracked_mgr else None
             should_release   = current_kommo_id != tracked_kommo_id
 
@@ -223,9 +223,9 @@ async def _handle_lead_event(event: dict):
             # Не повертаємось — продовжуємо стандартну обробку (закриття в боті)
 
     if str(pipeline_id) != AMO_PIPELINE_ID:
-        lead = get_lead(lead_id)
+        lead = await get_lead(lead_id)
         if lead and lead['status'] not in ('taken', 'duplicate', 'closed'):
-            q("UPDATE leads SET status='closed' WHERE lead_id=?", (lead_id,))
+            await q("UPDATE leads SET status='closed' WHERE lead_id=?", (lead_id,))
             await remove_from_others(lead_id, note="📋 Заявку переміщено в іншу воронку CRM")
             schedule_cleanup(lead_id)
             logger.info(f"Webhook: заявка {lead_id} пішла в іншу воронку → закрито в боті")
@@ -234,15 +234,15 @@ async def _handle_lead_event(event: dict):
         return
 
     if str(status_id) != AMO_HOT_STATUS_ID:
-        lead = get_lead(lead_id)
+        lead = await get_lead(lead_id)
         if lead and lead['status'] not in ('taken', 'duplicate', 'closed'):
-            q("UPDATE leads SET status='closed' WHERE lead_id=?", (lead_id,))
+            await q("UPDATE leads SET status='closed' WHERE lead_id=?", (lead_id,))
             await remove_from_others(lead_id, note="📋 Заявку переміщено на інший етап в CRM")
             schedule_cleanup(lead_id)
             logger.info(f"Webhook: заявка {lead_id} змінила статус → закрито в боті")
         return
 
-    if get_lead(lead_id):
+    if await get_lead(lead_id):
         return
 
     title = make_lead_title(status_id, lead_id)

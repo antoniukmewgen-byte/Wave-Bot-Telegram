@@ -1,35 +1,62 @@
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
+from pydantic import Field, ValidationError, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _require(key: str) -> str:
-    val = os.environ.get(key, '').strip()
-    if not val:
+class _Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
+
+    bot_token: str = Field(min_length=1)
+    sheets_id: str = Field(min_length=1)
+
+    amo_subdomain: str = 'movenation'
+    amo_token: str = ''
+    amo_pipeline_id: str = '10815171'
+    amo_hot_status_id: str = '85731907'
+    amo_distributed_status_id: str = '98056412'
+    amo_distributed_pipeline_id: str = '12703972'
+
+    webhook_path: str = 'movenation'
+    webhook_secret: str = ''
+
+    sheet_name: str = 'План|Факт|Мотивація Мдж'
+    google_creds: str = 'google_creds.json'
+
+    admin_ids: str = ''
+
+    @field_validator('webhook_secret', mode='before')
+    @classmethod
+    def _strip_secret(cls, v):
+        return v.strip() if isinstance(v, str) else v
+
+
+try:
+    _settings = _Settings()
+except ValidationError as e:
+    missing = ', '.join(err['loc'][0].upper() for err in e.errors() if err['type'] == 'missing')
+    if missing:
         raise RuntimeError(
-            f"Відсутня обов'язкова змінна середовища: {key}\n"
-            f"Переконайтесь що файл .env існує і містить {key}=..."
-        )
-    return val
+            f"Відсутні обов'язкові змінні середовища: {missing}\n"
+            f"Переконайтесь що файл .env існує і містить їх значення."
+        ) from e
+    raise
 
 
-BOT_TOKEN      = _require('BOT_TOKEN')
-AMO_SUBDOMAIN              = os.environ.get('AMO_SUBDOMAIN', 'movenation')
-AMO_TOKEN                  = os.environ.get('AMO_TOKEN', '')
-AMO_PIPELINE_ID            = os.environ.get('AMO_PIPELINE_ID', '10815171')
-AMO_HOT_STATUS_ID          = os.environ.get('AMO_HOT_STATUS_ID', '85731907')
-AMO_DISTRIBUTED_STATUS_ID   = os.environ.get('AMO_DISTRIBUTED_STATUS_ID', '98056412')
-AMO_DISTRIBUTED_PIPELINE_ID = os.environ.get('AMO_DISTRIBUTED_PIPELINE_ID', '12703972')
-WEBHOOK_PATH   = os.environ.get('WEBHOOK_PATH', 'movenation')
+BOT_TOKEN                   = _settings.bot_token
+AMO_SUBDOMAIN                = _settings.amo_subdomain
+AMO_TOKEN                    = _settings.amo_token
+AMO_PIPELINE_ID              = _settings.amo_pipeline_id
+AMO_HOT_STATUS_ID            = _settings.amo_hot_status_id
+AMO_DISTRIBUTED_STATUS_ID    = _settings.amo_distributed_status_id
+AMO_DISTRIBUTED_PIPELINE_ID  = _settings.amo_distributed_pipeline_id
+WEBHOOK_PATH   = _settings.webhook_path
 # Спільний секрет для перевірки вхідних вебхуків Kommo (?secret=... в URL).
 # Без нього /webhook/{WEBHOOK_PATH} приймає запити від БУДЬ-КОГО, хто дізнається шлях —
 # див. попередження при старті бота, якщо змінна не задана.
-WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', '').strip()
-SHEETS_ID      = _require('SHEETS_ID')
-SHEET_NAME     = os.environ.get('SHEET_NAME', 'План|Факт|Мотивація Мдж')
-GOOGLE_CREDS   = os.environ.get('GOOGLE_CREDS', 'google_creds.json')
-ADMIN_IDS      = [i.strip() for i in os.environ.get('ADMIN_IDS', '').split(',') if i.strip()]
+WEBHOOK_SECRET = _settings.webhook_secret
+SHEETS_ID      = _settings.sheets_id
+SHEET_NAME     = _settings.sheet_name
+GOOGLE_CREDS   = _settings.google_creds
+ADMIN_IDS      = [i.strip() for i in _settings.admin_ids.split(',') if i.strip()]
 
 COL_MANAGER    = 0
 COL_YEAR       = 2

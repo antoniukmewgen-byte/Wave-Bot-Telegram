@@ -12,7 +12,7 @@ from telegram.ext import (
 
 import state
 from config import BOT_TOKEN
-from db import init_db, init_default_schedules, get_managers_dict
+from db import init_db, init_default_schedules, get_managers_dict, close_db
 from kommo import close_session as close_kommo_session
 from queue_logic import build_scheduler, deactivate_out_of_schedule
 from sheets import warmup
@@ -39,9 +39,9 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(fastapi: FastAPI):
-    init_db()
-    state.reload_managers()
-    init_default_schedules(get_managers_dict())
+    await init_db()
+    await state.reload_managers()
+    await init_default_schedules(await get_managers_dict())
 
     state._app = (
         Application.builder()
@@ -138,12 +138,6 @@ async def lifespan(fastapi: FastAPI):
     )
     await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
-    loop = asyncio.get_event_loop()
-    future = loop.run_in_executor(None, warmup)
-    future.add_done_callback(
-        lambda f: logger.error(f"Sheets warmup failed: {f.exception()}") if f.exception() else None
-    )
-
     def _task_error_handler(task: asyncio.Task):
         if not task.cancelled() and task.exception():
             logger.error(f"Фонова задача '{task.get_name()}' впала: {task.exception()}")
@@ -154,9 +148,16 @@ async def lifespan(fastapi: FastAPI):
         except Exception as e:
             logger.error(f"deactivate_out_of_schedule: {e}")
 
+    async def _safe_warmup():
+        try:
+            await warmup()
+        except Exception as e:
+            logger.error(f"Sheets warmup failed: {e}")
+
     for coro, name in [
         (app.updater.start_polling(allowed_updates=Update.ALL_TYPES), 'polling'),
         (_safe_deactivate(), 'deactivate_on_start'),
+        (_safe_warmup(), 'sheets_warmup'),
     ]:
         t = asyncio.create_task(coro, name=name)
         t.add_done_callback(_task_error_handler)
@@ -171,6 +172,7 @@ async def lifespan(fastapi: FastAPI):
     await app.stop()
     await app.shutdown()
     await close_kommo_session()
+    await close_db()
     logger.info("Бот зупинено")
 
 

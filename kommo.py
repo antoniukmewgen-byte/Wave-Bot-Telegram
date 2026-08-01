@@ -115,7 +115,7 @@ async def get_lead_info(lead_id: str) -> Optional[dict]:
 
 async def set_kommo_responsible(lead_id: str, manager_id: str) -> bool:
     """Встановлює відповідального менеджера в Kommo. Повертає True якщо успішно."""
-    mgr = get_manager(manager_id)
+    mgr = await get_manager(manager_id)
     kommo_user_id = mgr['kommo_id'] if mgr else None
     if not kommo_user_id or not AMO_TOKEN:
         return False
@@ -228,13 +228,13 @@ async def sync_from_kommo() -> tuple[int, int, int]:
         for lead in leads:
             lead_id = str(lead["id"])
             kommo_ids.add(lead_id)
-            if get_lead(lead_id):
+            if await get_lead(lead_id):
                 skipped += 1
                 continue
             title   = make_lead_title(AMO_HOT_STATUS_ID, lead_id)
             created = lead.get("created_at") or datetime.now().timestamp()
             try:
-                q("INSERT INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
+                await q("INSERT INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
                   (lead_id, "queued", created, title))
                 added += 1
             except Exception as e:
@@ -244,13 +244,13 @@ async def sync_from_kommo() -> tuple[int, int, int]:
             break
         page += 1
 
-    active_rows = q(
+    active_rows = await q(
         "SELECT lead_id FROM leads WHERE status NOT IN ('taken','duplicate','closed')",
         fetch='all',
     )
     for row in (active_rows or []):
         if row['lead_id'] not in kommo_ids:
-            q("UPDATE leads SET status='closed' WHERE lead_id=?", (row['lead_id'],))
+            await q("UPDATE leads SET status='closed' WHERE lead_id=?", (row['lead_id'],))
             await remove_from_others(row['lead_id'], note="📋 Заявку закрито в CRM")
             closed += 1
             logger.info(f"Sync: заявка {row['lead_id']} відсутня в Kommo → закрито")

@@ -46,7 +46,7 @@ def _render_table(headers: list, rows: list) -> str:
 
 
 async def _handle_manager_status(message, managers: dict):
-    await send_long(message, build_manager_status_text(managers))
+    await send_long(message, await build_manager_status_text(managers))
 
 
 async def on_statuschat_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -60,20 +60,20 @@ async def on_statuschat_toggle(update: Update, context: ContextTypes.DEFAULT_TYP
     chat_id  = update.effective_chat.id
 
     if command == 'statuson':
-        add_status_chat(chat_id)
+        await add_status_chat(chat_id)
         await update.message.reply_text(
             "✅ Розсилку статусу менеджерів увімкнено для цього чату.\n"
             "Щогодини з 17:00 до 22:00 сюди прилітатиме звіт."
         )
     elif command == 'statusoff':
-        remove_status_chat(chat_id)
+        await remove_status_chat(chat_id)
         await update.message.reply_text("🔕 Розсилку статусу менеджерів для цього чату вимкнено.")
 
 
 async def _handle_connections(message):
-    connected = {r['manager_id']: r for r in get_connected()}
+    connected = {r['manager_id']: r for r in await get_connected()}
     lines = ["🔌 <b>Підключення менеджерів:</b>\n"]
-    for name, tg_id in get_managers_dict().items():
+    for name, tg_id in (await get_managers_dict()).items():
         if tg_id in connected:
             dt = datetime.fromtimestamp(connected[tg_id]['connected_at'])
             lines.append(f"✅ {name} — підключився {dt.strftime('%d.%m %H:%M')}")
@@ -83,7 +83,7 @@ async def _handle_connections(message):
 
 
 async def _handle_active_leads(message, managers: dict):
-    rows = q(
+    rows = await q(
         "SELECT * FROM leads WHERE status NOT IN ('taken','duplicate','closed') ORDER BY created_at DESC",
         fetch='all',
     )
@@ -116,14 +116,14 @@ async def _handle_daily_stats(message):
     today_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     today_str   = now_dt.strftime('%d.%m.%Y')
 
-    taken_rows = q(
+    taken_rows = await q(
         "SELECT * FROM leads WHERE taken_at >= ? AND status = 'taken' ORDER BY taken_at",
         (today_start,), fetch='all',
     )
-    active_count = q(
+    active_count = (await q(
         "SELECT COUNT(*) as cnt FROM leads WHERE status NOT IN ('taken','duplicate','closed')",
         fetch='one',
-    )['cnt']
+    ))['cnt']
 
     if not taken_rows and active_count == 0:
         await message.reply_text(f"📅 <b>За сьогодні ({today_str})</b>\n\nЗаявок не було.", parse_mode='HTML')
@@ -143,7 +143,7 @@ async def _handle_daily_stats(message):
         mgr_reactions_d[mid].append(reaction_min)
 
     summary_rows = []
-    for mgr_name, tg_id in get_managers_dict().items():
+    for mgr_name, tg_id in (await get_managers_dict()).items():
         t = mgr_taken_d.get(tg_id, 0)
         if t == 0:
             continue
@@ -183,7 +183,7 @@ async def _handle_monthly_stats(message):
     month_start = now_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
     month_label = now_dt.strftime('%m.%Y')
 
-    month_rows = q(
+    month_rows = await q(
         "SELECT * FROM leads WHERE taken_at >= ? AND status = 'taken' ORDER BY taken_at",
         (month_start,), fetch='all',
     )
@@ -205,7 +205,7 @@ async def _handle_monthly_stats(message):
 
     m_rows      = []
     total_taken = 0
-    for mgr_name, tg_id in get_managers_dict().items():
+    for mgr_name, tg_id in (await get_managers_dict()).items():
         t = mgr_taken.get(tg_id, 0)
         if t == 0:
             continue
@@ -227,10 +227,10 @@ async def _handle_monthly_stats(message):
 
 async def _handle_queue(message, managers: dict):
     month     = day_key()
-    avail_map = get_all_availability()
-    overrides = get_all_max_leads_overrides()
-    taken_map = get_all_taken(month)
-    sent_map  = _build_sent_map()
+    avail_map = await get_all_availability()
+    overrides = await get_all_max_leads_overrides()
+    taken_map = await get_all_taken(month)
+    sent_map  = await _build_sent_map()
 
     active = []
     for tg_id, info in managers.items():
@@ -265,12 +265,12 @@ async def _handle_diagnostics(message):
     now = datetime.now().timestamp()
     lines = ["🔍 <b>Повна діагностика бота</b>\n"]
 
-    all_leads = q(
+    all_leads = await q(
         "SELECT * FROM leads WHERE status NOT IN ('taken','duplicate','closed') ORDER BY created_at DESC",
         fetch='all',
     ) or []
     msg_counts = {}
-    for row in (q("SELECT lead_id, COUNT(*) as cnt FROM messages WHERE active=1 GROUP BY lead_id", fetch='all') or []):
+    for row in (await q("SELECT lead_id, COUNT(*) as cnt FROM messages WHERE active=1 GROUP BY lead_id", fetch='all') or []):
         msg_counts[row['lead_id']] = row['cnt']
 
     lines.append(f"📋 <b>Активні заявки ({len(all_leads)}):</b>")
@@ -289,17 +289,17 @@ async def _handle_diagnostics(message):
         )
 
     lines.append("\n\n📢 <b>Broadcast черга:</b>")
-    bc_active = q("SELECT lead_id FROM leads WHERE status='broadcast' AND sent_at IS NOT NULL", fetch='all') or []
-    bc_waiting = q("SELECT lead_id FROM leads WHERE status='broadcast' AND sent_at IS NULL ORDER BY created_at DESC", fetch='all') or []
+    bc_active = await q("SELECT lead_id FROM leads WHERE status='broadcast' AND sent_at IS NOT NULL", fetch='all') or []
+    bc_waiting = await q("SELECT lead_id FROM leads WHERE status='broadcast' AND sent_at IS NULL ORDER BY created_at DESC", fetch='all') or []
     lines.append(f"  Активна (надіслана): {', '.join(r['lead_id'] for r in bc_active)}" if bc_active else "  Активна: немає")
     lines.append(f"  Чекають в черзі: {', '.join(r['lead_id'] for r in bc_waiting)}" if bc_waiting else "  Черга: порожня")
 
     lines.append("\n\n👥 <b>Менеджери:</b>")
-    avail_map    = get_all_availability()
-    overrides    = get_all_max_leads_overrides()
-    taken_map    = get_all_taken(day_key())
-    sent_map     = _build_sent_map()
-    exit_reasons = get_all_exit_reasons()
+    avail_map    = await get_all_availability()
+    overrides    = await get_all_max_leads_overrides()
+    taken_map    = await get_all_taken(day_key())
+    sent_map     = await _build_sent_map()
+    exit_reasons = await get_all_exit_reasons()
 
     try:
         managers  = await fetch_managers_async()
@@ -309,7 +309,7 @@ async def _handle_diagnostics(message):
         sheets_ok = False
         lines.append(f"  ⚠️ Google Sheets недоступний: {e}")
 
-    for name, tg_id in get_managers_dict().items():
+    for name, tg_id in (await get_managers_dict()).items():
         active    = avail_map.get(tg_id, False)
         in_sheet  = tg_id in managers
         taken     = taken_map.get(tg_id, 0)
@@ -335,10 +335,10 @@ async def _handle_diagnostics(message):
         lines.append("  ❌ Не вдалось підключитись до таблиці")
 
     lines.append("\n\n🗄 <b>БД статистика:</b>")
-    total_leads = q("SELECT COUNT(*) as cnt FROM leads", fetch='one')['cnt']
-    taken_total = q("SELECT COUNT(*) as cnt FROM leads WHERE status='taken'", fetch='one')['cnt']
-    dup_total   = q("SELECT COUNT(*) as cnt FROM leads WHERE status='duplicate'", fetch='one')['cnt']
-    msg_total   = q("SELECT COUNT(*) as cnt FROM messages", fetch='one')['cnt']
+    total_leads = (await q("SELECT COUNT(*) as cnt FROM leads", fetch='one'))['cnt']
+    taken_total = (await q("SELECT COUNT(*) as cnt FROM leads WHERE status='taken'", fetch='one'))['cnt']
+    dup_total   = (await q("SELECT COUNT(*) as cnt FROM leads WHERE status='duplicate'", fetch='one'))['cnt']
+    msg_total   = (await q("SELECT COUNT(*) as cnt FROM messages", fetch='one'))['cnt']
     lines.append(f"  Всього заявок: {total_leads} (взято: {taken_total}, дублів: {dup_total})")
     lines.append(f"  Повідомлень у messages: {msg_total}")
 
@@ -394,7 +394,7 @@ async def _handle_managers_list(message):
     """Показує список всіх менеджерів у БД та заявки на схвалення."""
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-    all_mgrs  = get_all_managers(approved_only=False)
+    all_mgrs  = await get_all_managers(approved_only=False)
     pending   = [m for m in all_mgrs if not m['is_approved']]
     approved  = [m for m in all_mgrs if m['is_approved']]
 

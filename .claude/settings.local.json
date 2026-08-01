@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import pydantic_settings; print\\(pydantic_settings.__version__\\)\")",
+      "Bash(python -c \"import pydantic; print\\(pydantic.VERSION\\)\")",
+      "Bash(pip install *)",
+      "Bash(python -m py_compile config.py)",
+      "Bash(python -c ' *)",
+      "Bash(echo \"exit=$?\")",
+      "Read(//d/tmp/**)",
+      "Bash(python -m pytest -q)",
+      "Bash(python -c \"import gspread_asyncio; print\\(gspread_asyncio.__file__\\)\")",
+      "Bash(pip show *)",
+      "Bash(pip index *)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(python -c \"import gspread_asyncio, inspect; print\\([n for n in dir\\(gspread_asyncio\\) if not n.startswith\\('_'\\)]\\)\")",
+      "Bash(python -m py_compile config.py sheets.py handlers/manager.py queue_logic.py main.py)",
+      "Bash(python -m py_compile sheets.py)",
+      "Bash(python -m py_compile tests/test_kommo.py kommo.py requirements.txt)",
+      "Bash(python -m py_compile tests/test_kommo.py kommo.py)",
+      "Bash(git fetch *)",
+      "Bash(git diff *)",
+      "Read(//tmp/**)",
+      "Bash(python -m pytest tests/ -q)",
+      "Bash(python -c 'import ast,sys *)"
+    ]
+  }
+}

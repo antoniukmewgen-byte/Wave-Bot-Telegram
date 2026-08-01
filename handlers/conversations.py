@@ -39,7 +39,7 @@ async def limits_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     managers  = await fetch_managers_async()
-    overrides = get_all_max_leads_overrides()
+    overrides = await get_all_max_leads_overrides()
 
     buttons = []
     for tg_id, info in managers.items():
@@ -106,7 +106,7 @@ async def limits_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name      = context.user_data.get('limit_name', tg_id)
     max_leads = None if value == 0 else value
 
-    set_max_leads_override(tg_id, max_leads)
+    await set_max_leads_override(tg_id, max_leads)
     context.user_data.clear()
 
     from handlers.admin import ADMIN_KB
@@ -134,9 +134,9 @@ async def schedules_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ У вас немає доступу до цієї функції.")
         return ConversationHandler.END
 
-    schedules = get_all_schedules()
+    schedules = await get_all_schedules()
     buttons   = []
-    for name, tg_id in sorted(get_managers_dict().items(), key=lambda x: x[0]):
+    for name, tg_id in sorted((await get_managers_dict()).items(), key=lambda x: x[0]):
         sch = schedules.get(tg_id)
         sch_text = _format_schedule(sch) if sch else '—'
         buttons.append([InlineKeyboardButton(
@@ -164,7 +164,7 @@ async def schedules_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['sched_manager_id'] = tg_id
 
     name      = state.MANAGERS_BY_ID.get(tg_id, tg_id)
-    schedules = get_all_schedules()
+    schedules = await get_all_schedules()
     sch       = schedules.get(tg_id)
     current   = _format_schedule(sch) if sch else 'не задано'
 
@@ -256,7 +256,7 @@ async def schedules_end_time(update: Update, context: ContextTypes.DEFAULT_TYPE)
     days       = context.user_data['sched_days']
     start_time = context.user_data['sched_start']
     end_time   = text
-    set_schedule(tg_id, days, start_time, end_time)
+    await set_schedule(tg_id, days, start_time, end_time)
     context.user_data.clear()
 
     from handlers.admin import ADMIN_KB
@@ -290,7 +290,7 @@ async def reg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = str(query.from_user.id)
 
     # Якщо вже в системі
-    existing = get_manager(tg_id)
+    existing = await get_manager(tg_id)
     if existing:
         if existing['is_approved']:
             await query.edit_message_text("✅ Ви вже зареєстровані в системі.")
@@ -304,7 +304,7 @@ async def reg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         sheet_data = await fetch_managers_async()
         registered_sheet_names = {
-            r['sheet_name'] for r in get_all_managers(approved_only=False)
+            r['sheet_name'] for r in await get_all_managers(approved_only=False)
             if r['sheet_name']
         }
         available_names = [
@@ -398,7 +398,7 @@ async def _submit_registration(query, tg_id: str, sheet_name: str, kommo_id):
 
     tg_name = query.from_user.full_name
 
-    upsert_manager(tg_id, tg_name, sheet_name, kommo_id)
+    await upsert_manager(tg_id, tg_name, sheet_name, kommo_id)
 
     await query.edit_message_text(
         f"✅ <b>Заявку відправлено!</b>\n\n"

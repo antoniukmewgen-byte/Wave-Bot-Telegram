@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from datetime import datetime
 
@@ -47,7 +46,7 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.full_name
 
     is_admin   = user_id in ADMIN_IDS
-    mgr_row    = get_manager(user_id)
+    mgr_row    = await get_manager(user_id)
     is_manager = mgr_row is not None and bool(mgr_row.get('is_approved'))
 
     if not is_admin and not is_manager:
@@ -74,15 +73,15 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mgr_name = state.MANAGERS_BY_ID.get(user_id, user_name)
 
     # Запам'ятовуємо попередній час підключення ДО оновлення
-    prev_connected_ts = get_last_connected_ts(user_id)
-    mark_connected(user_id, mgr_name)
+    prev_connected_ts = await get_last_connected_ts(user_id)
+    await mark_connected(user_id, mgr_name)
     # Оновлюємо runtime-словник щоб логи та повідомлення завжди мали актуальне ім'я
     state.MANAGERS_BY_ID[user_id] = mgr_name
 
     if is_admin:
         await update.message.reply_text("👋 Вітаю, адміне!\nОберіть дію:", reply_markup=ADMIN_KB)
     else:
-        active = is_available(user_id)
+        active = await is_available(user_id)
         status = "✅ В черзі" if active else "🚫 Не в черзі"
         await update.message.reply_text(
             f"✅ Вітаю, {mgr_name}!\nПоточний статус: {status}",
@@ -103,7 +102,7 @@ async def on_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not name:
         await update.message.reply_text("⛔ Ця команда вам недоступна.")
         return
-    active = is_available(user_id)
+    active = await is_available(user_id)
     status = "✅ В черзі" if active else "🚫 Не в черзі"
     await update.message.reply_text(
         f"👤 <b>{name}</b>\nПоточний статус: {status}\n\nОберіть дію:",
@@ -123,18 +122,18 @@ async def on_work_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if active:
         managers = await fetch_managers_async()
         if user_id not in managers:
-            reason = await asyncio.to_thread(get_block_reason, user_id) or "❌ Ви не можете увійти в чергу. Зверніться до керівника."
+            reason = await get_block_reason(user_id) or "❌ Ви не можете увійти в чергу. Зверніться до керівника."
             await update.message.reply_text(reason, reply_markup=MANAGER_KB)
-            set_availability(user_id, False, reason='blocked')
+            await set_availability(user_id, False, reason='blocked')
             return
 
     if active:
-        pending = get_manager_distributed_leads(user_id)
+        pending = await get_manager_distributed_leads(user_id)
         if pending:
             await update.message.reply_text(_still_distributed_text(pending), reply_markup=MANAGER_KB)
             return
 
-    set_availability(user_id, active, reason=None if active else 'manual')
+    await set_availability(user_id, active, reason=None if active else 'manual')
     status = "✅ Ви в черзі — заявки надходитимуть" if active else "🚫 Ви вийшли з черги — заявки не надходитимуть"
     await update.message.reply_text(status, reply_markup=MANAGER_KB)
     if active:
@@ -168,7 +167,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             active = (lead_id == 'on')
             if active:
-                pending = get_manager_distributed_leads(manager_id)
+                pending = await get_manager_distributed_leads(manager_id)
                 if pending:
                     await query.answer()
                     await query.edit_message_text(
@@ -178,7 +177,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     return
 
-            set_availability(manager_id, active, reason=None if active else 'manual')
+            await set_availability(manager_id, active, reason=None if active else 'manual')
             await query.answer()
             status = "✅ Ви в черзі — заявки надходитимуть" if active else "🚫 Ви вийшли з черги — заявки не надходитимуть"
             await query.edit_message_text(
@@ -199,7 +198,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         return
 
-    lead = get_lead(lead_id)
+    lead = await get_lead(lead_id)
     if not lead:
         await query.answer("⚠️ Заявка не знайдена", show_alert=True)
         return
@@ -214,22 +213,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if action in ('take', 't'):
-            if not is_available(manager_id) or manager_id not in managers:
+            if not await is_available(manager_id) or manager_id not in managers:
                 await query.answer("⛔ Ви поза чергою — заявку взяти неможливо", show_alert=True)
                 return
 
             mgr_info  = managers.get(manager_id, {})
-            overrides = get_all_max_leads_overrides()
+            overrides = await get_all_max_leads_overrides()
             max_leads = overrides[manager_id] if manager_id in overrides else mgr_info.get('max_leads')
 
             if max_leads is not None:
-                taken_today = get_taken(manager_id, day_key())
+                taken_today = await get_taken(manager_id, day_key())
                 if taken_today >= max_leads:
                     await query.answer("⛔ Ви вже взяли максимальну кількість лідів на сьогодні", show_alert=True)
                     await edit_msg(manager_id, lead_id, f"⛔ Ліміт вичерпано ({taken_today}/{max_leads})\n\n{lead['title']}")
                     return
 
-            if not take_lead(lead_id, manager_id, day_key()):
+            if not await take_lead(lead_id, manager_id, day_key()):
                 await query.answer("❌ Заявку вже взяв інший менеджер", show_alert=True)
                 await edit_msg(manager_id, lead_id, "❌ Заявку вже взяв інший менеджер")
                 return
@@ -237,9 +236,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Одразу виводимо з черги — не чекаємо вебхука Kommo про 'Распределены',
             # бо в цьому вікні черга могла встигнути надіслати ще один лід.
             # on_lead_distributed пізніше підтвердить той самий стан (ідемпотентно).
-            add_distributed_lead(lead_id, manager_id)
-            if is_available(manager_id):
-                set_availability(manager_id, False, reason='has_distributed')
+            await add_distributed_lead(lead_id, manager_id)
+            if await is_available(manager_id):
+                await set_availability(manager_id, False, reason='has_distributed')
                 await remove_buttons_for_manager(manager_id)
 
             await query.answer()
@@ -255,7 +254,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await notify_admins(f"✅ <b>{mgr_name}</b> взяв(ла) заявку в роботу\n\n{lead['title']}")
 
             if max_leads is not None:
-                taken_today = get_taken(manager_id, day_key())
+                taken_today = await get_taken(manager_id, day_key())
                 if taken_today >= max_leads:
                     await state._app.bot.send_message(
                         chat_id=manager_id,
@@ -264,7 +263,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
 
         elif action in ('skip', 's'):
-            if not is_available(manager_id):
+            if not await is_available(manager_id):
                 await query.answer(
                     "⛔ Ви поза чергою. Щоб взаємодіяти із заявками — спочатку увійдіть у чергу (/work)",
                     show_alert=True,
@@ -272,18 +271,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             await query.answer()
-            mark_skipped(lead_id, manager_id)
+            await mark_skipped(lead_id, manager_id)
             await edit_msg(manager_id, lead_id, f"⏭ Ви відмовились від заявки\n\n{lead['title']}")
             schedule_delete_msg(manager_id, lead_id)
 
-            lead = get_lead(lead_id)
+            lead = await get_lead(lead_id)
             if lead and lead['status'] == 'sent':
-                q("UPDATE leads SET status='queued', manager_id=NULL, sent_at=NULL WHERE lead_id=?", (lead_id,))
-                await assign_next(lead_id, exclude=get_skipped(lead_id))
+                await q("UPDATE leads SET status='queued', manager_id=NULL, sent_at=NULL WHERE lead_id=?", (lead_id,))
+                await assign_next(lead_id, exclude=await get_skipped(lead_id))
             logger.info(f"Заявка {lead_id} відхилена {mgr_name}")
 
         elif action in ('dup', 'd'):
-            if not is_available(manager_id):
+            if not await is_available(manager_id):
                 await query.answer(
                     "⛔ Ви поза чергою. Щоб взаємодіяти із заявками — спочатку увійдіть у чергу (/work)",
                     show_alert=True,
@@ -291,7 +290,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             await query.answer()
-            q("UPDATE leads SET status='duplicate' WHERE lead_id=?", (lead_id,))
+            await q("UPDATE leads SET status='duplicate' WHERE lead_id=?", (lead_id,))
             await edit_msg(manager_id, lead_id, "🔁 Ви позначили заявку як дубль")
             await remove_from_others(lead_id, except_id=manager_id, note="🔁 Заявка закрита як дубль")
             schedule_cleanup(lead_id)

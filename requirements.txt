@@ -1,10 +1,15 @@
 python-telegram-bot==21.5
 fastapi==0.110.0
 uvicorn==0.29.0
-gspread==6.1.2
+# gspread закріплено на 6.0.x навмисно — gspread-asyncio==2.0.0 жорстко
+# вимагає gspread==6.0.* (див. його метадані залежностей), новіший gspread зламає імпорт.
+gspread==6.0.2
+gspread-asyncio==2.0.0
 google-auth==2.29.0
 python-multipart==0.0.9
 python-dotenv==1.0.1
 aiohttp==3.9.5
 tenacity==9.1.4
 apscheduler==3.11.3
+pydantic-settings==2.14.2
+aiosqlite==0.22.1

@@ -1,10 +1,9 @@
 import asyncio
 import logging
-import threading
 from datetime import datetime
 from typing import Dict, Optional
 
-import gspread
+import gspread_asyncio
 from google.oauth2.service_account import Credentials
 
 from config import (
@@ -27,8 +26,12 @@ MONTHS_UA = {
 }
 
 # ─── Одне постійне підключення ───────────────────────────────────────────────
-_gc: Optional[gspread.Client] = None
-_ws: Optional[gspread.Worksheet] = None
+# gspread_asyncio сам відповідає за поновлення токена (reauth_interval) —
+# ручний _reconnect() тут більше не потрібен для авторизації, лишається
+# тільки для перепідключення worksheet, якщо саме він став невалідним.
+_agcm: Optional[gspread_asyncio.AsyncioGspreadClientManager] = None
+_ws: Optional[gspread_asyncio.AsyncioGspreadWorksheet] = None
+_ws_lock = asyncio.Lock()
 
 
 _SCOPES = [
@@ -37,30 +40,42 @@ _SCOPES = [
 ]
 
 
-def _get_ws() -> gspread.Worksheet:
+def _get_credentials() -> Credentials:
+    return Credentials.from_service_account_file(GOOGLE_CREDS, scopes=_SCOPES)
+
+
+def _get_agcm() -> gspread_asyncio.AsyncioGspreadClientManager:
+    global _agcm
+    if _agcm is None:
+        _agcm = gspread_asyncio.AsyncioGspreadClientManager(_get_credentials)
+    return _agcm
+
+
+async def _get_ws() -> gspread_asyncio.AsyncioGspreadWorksheet:
     """Повертає worksheet, перепідключається якщо сесія протухла."""
-    global _gc, _ws
+    global _ws
     if _ws is None:
-        creds = Credentials.from_service_account_file(GOOGLE_CREDS, scopes=_SCOPES)
-        _gc   = gspread.authorize(creds)
-        _ws   = _gc.open_by_key(SHEETS_ID).worksheet(SHEET_NAME)
-        logger.info("Sheets: підключення встановлено")
+        async with _ws_lock:
+            if _ws is None:
+                agc = await _get_agcm().authorize()
+                ss  = await agc.open_by_key(SHEETS_ID)
+                _ws = await ss.worksheet(SHEET_NAME)
+                logger.info("Sheets: підключення встановлено")
     return _ws
 
 
-def _reconnect() -> gspread.Worksheet:
-    """Примусове перепідключення (якщо токен протух)."""
-    global _gc, _ws
-    _gc = None
+async def _reconnect() -> gspread_asyncio.AsyncioGspreadWorksheet:
+    """Примусове перепідключення (якщо worksheet протух)."""
+    global _ws
     _ws = None
-    return _get_ws()
+    return await _get_ws()
 
 
 # ─── Кеш менеджерів ──────────────────────────────────────────────────────────
 _cache: Dict[str, dict] = {}
 _cache_ts: float = 0.0
 _rows_cache: list = []
-_lock = threading.Lock()
+_lock = asyncio.Lock()
 
 # Ключові слова, які очікуємо побачити в заголовку кожної колонки (нижній регістр).
 # Джерело — коментарі біля COL_* у config.py. Використовується лише для
@@ -133,28 +148,28 @@ def _row_matches_period(row: list, year_str: str, month_str: str) -> bool:
     return row[COL_YEAR].strip() == year_str and row[COL_MONTH].strip() == month_str
 
 
-def _sheet_name_to_tg_id() -> Dict[str, str]:
+async def _sheet_name_to_tg_id() -> Dict[str, str]:
     return {
         r['sheet_name']: r['tg_id']
-        for r in get_all_managers(approved_only=True)
+        for r in await get_all_managers(approved_only=True)
         if r['sheet_name']
     }
 
 
-def _read_rows() -> list:
+async def _read_rows() -> list:
     """Читає всі рядки з кешованим підключенням."""
     global _rows_cache
     try:
-        ws = _get_ws()
-        _rows_cache = ws.get('A1:AK200', value_render_option='FORMATTED_VALUE') or []
+        ws = await _get_ws()
+        _rows_cache = await ws.get('A1:AK200', value_render_option='FORMATTED_VALUE') or []
     except Exception:
-        ws = _reconnect()
-        _rows_cache = ws.get('A1:AK200', value_render_option='FORMATTED_VALUE') or []
+        ws = await _reconnect()
+        _rows_cache = await ws.get('A1:AK200', value_render_option='FORMATTED_VALUE') or []
     _validate_header_row(_rows_cache)
     return _rows_cache
 
 
-def fetch_managers() -> Dict[str, dict]:
+async def fetch_managers() -> Dict[str, dict]:
     """
     Повертає {telegram_id: {name, conversion, payments, hot_taken, max_leads}}
     Кеш оновлюється раз на SHEETS_REFRESH секунд.
@@ -168,20 +183,20 @@ def fetch_managers() -> Dict[str, dict]:
     if now - cache_ts < SHEETS_REFRESH and cache:
         return cache
 
-    with _lock:
-        # Повторна перевірка після отримання lock (інший потік міг вже оновити кеш)
+    async with _lock:
+        # Повторна перевірка після отримання lock (інший таск міг вже оновити кеш)
         now2 = datetime.now().timestamp()
         if now2 - _cache_ts < SHEETS_REFRESH and _cache:
             return _cache
 
         try:
-            rows      = _read_rows()
+            rows      = await _read_rows()
             now_dt    = datetime.now()
             year_str  = str(now_dt.year)
             month_str = MONTHS_UA[now_dt.month]
 
             # Завантажуємо всіх менеджерів одним запитом → O(1) lookup у циклі
-            sheet_name_to_id = _sheet_name_to_tg_id()
+            sheet_name_to_id = await _sheet_name_to_tg_id()
 
             result: Dict[str, dict] = {}
             for row in rows[1:]:
@@ -243,32 +258,22 @@ def fetch_managers() -> Dict[str, dict]:
     return _cache
 
 
-async def fetch_managers_async() -> Dict[str, dict]:
-    """
-    Async-безпечна обгортка над fetch_managers().
-
-    fetch_managers() сама по собі синхронна: коли кеш (SHEETS_REFRESH) протух,
-    вона виконує "живий" мережевий запит до Google Sheets і блокує потік до
-    відповіді. Викликана напряму з async-коду (хендлери, _tick тощо) вона
-    заморожує весь asyncio event loop бота — тобто взагалі всіх користувачів —
-    на час цього запиту, приблизно раз на хвилину.
-
-    Ця функція виносить виклик в окремий потік через asyncio.to_thread, тому
-    event loop лишається вільним. Кешування, локи й логіка fetch_managers()
-    лишаються без змін — тут просто інший спосіб її викликати з async-коду.
-    """
-    return await asyncio.to_thread(fetch_managers)
+# Історичний псевдонім: раніше fetch_managers() була синхронною і викликалась
+# через asyncio.to_thread(), а fetch_managers_async() — обгорткою над нею.
+# Тепер fetch_managers() сама по собі async (gspread_asyncio), тож псевдонім
+# лишається лише щоб не займатись пере-роботою кожного виклику по всьому коду.
+fetch_managers_async = fetch_managers
 
 
-def get_block_reason(tg_id: str) -> Optional[str]:
+async def get_block_reason(tg_id: str) -> Optional[str]:
     """Повертає причину, чому менеджер не може потрапити в чергу, або None якщо все ок."""
     try:
-        rows     = _read_rows()
+        rows     = await _read_rows()
         now_dt   = datetime.now()
         year_str = str(now_dt.year)
         month_str = MONTHS_UA[now_dt.month]
 
-        sheet_to_id = _sheet_name_to_tg_id()
+        sheet_to_id = await _sheet_name_to_tg_id()
 
         for row in rows[1:]:
             if not _row_matches_period(row, year_str, month_str):
@@ -300,8 +305,8 @@ def get_block_reason(tg_id: str) -> Optional[str]:
     return None
 
 
-def warmup():
+async def warmup():
     """Прогрів кешу при старті — викликати один раз."""
     logger.info("Sheets: прогрів кешу...")
-    fetch_managers()
+    await fetch_managers()
     logger.info("Sheets: кеш готовий")

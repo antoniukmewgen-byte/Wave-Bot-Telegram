@@ -74,8 +74,8 @@ async def notify_admin_error(where: str, error: Exception, manager_id: str = Non
 
 async def _deactivate_blocked(manager_id: str):
     name = state.MANAGERS_BY_ID.get(manager_id, manager_id)
-    delete_manager(manager_id)
-    set_availability(manager_id, False, reason='bot_blocked')
+    await delete_manager(manager_id)
+    await set_availability(manager_id, False, reason='bot_blocked')
     # Видаляємо з MANAGERS_BY_ID щоб назва не залишалась у пам'яті
     state.MANAGERS_BY_ID.pop(manager_id, None)
     logger.warning(f"{name} ({manager_id}) заблокував бота — видалено з бота")
@@ -126,12 +126,12 @@ async def send_to(manager_id: str, lead_id: str, text: str, keyboard) -> int:
         logger.error(f"send_to {manager_id}: {e}")
         await notify_admin_error("send_to (відправка заявки)", e, manager_id)
         raise
-    save_msg(lead_id, manager_id, msg.message_id)
+    await save_msg(lead_id, manager_id, msg.message_id)
     return msg.message_id
 
 
 async def edit_msg(manager_id: str, lead_id: str, text: str, keyboard=None):
-    msg_id = get_msg_id(lead_id, manager_id)
+    msg_id = await get_msg_id(lead_id, manager_id)
     if not msg_id:
         return
     try:
@@ -142,7 +142,7 @@ async def edit_msg(manager_id: str, lead_id: str, text: str, keyboard=None):
             reply_markup=keyboard,
             parse_mode='HTML',
         )
-        set_msg_active(lead_id, manager_id, keyboard is not None)
+        await set_msg_active(lead_id, manager_id, keyboard is not None)
     except Forbidden:
         await _deactivate_blocked(manager_id)
     except Exception as e:
@@ -150,7 +150,7 @@ async def edit_msg(manager_id: str, lead_id: str, text: str, keyboard=None):
 
 
 async def delete_and_send(manager_id: str, lead_id: str, text: str, keyboard):
-    msg_id = get_msg_id(lead_id, manager_id)
+    msg_id = await get_msg_id(lead_id, manager_id)
     if msg_id:
         try:
             await state._app.bot.delete_message(chat_id=manager_id, message_id=msg_id)
@@ -161,7 +161,7 @@ async def delete_and_send(manager_id: str, lead_id: str, text: str, keyboard):
 
 async def remove_buttons_for_manager(manager_id: str):
     """При виході з черги — прибирає кнопки з усіх активних повідомлень менеджера."""
-    rows = q("""
+    rows = await q("""
         SELECT l.lead_id, l.title FROM leads l
         JOIN messages m ON m.lead_id = l.lead_id
         WHERE m.manager_id = ?
@@ -177,7 +177,7 @@ async def delete_messages_for_manager(manager_id: str):
     усі активні повідомлення менеджера (як особисті, так і broadcast) і чистить БД,
     щоб вони не залишались "привидами" й не заважали при поверненні в чергу.
     """
-    rows = q("""
+    rows = await q("""
         SELECT m.lead_id, m.msg_id FROM messages m
         JOIN leads l ON l.lead_id = m.lead_id
         WHERE m.manager_id = ?
@@ -188,23 +188,23 @@ async def delete_messages_for_manager(manager_id: str):
             await state._app.bot.delete_message(chat_id=manager_id, message_id=row['msg_id'])
         except Exception as e:
             logger.debug(f"delete_messages_for_manager: не вдалось видалити {row['msg_id']} для {manager_id}: {e}")
-        q("DELETE FROM messages WHERE lead_id=? AND manager_id=?", (row['lead_id'], manager_id))
+        await q("DELETE FROM messages WHERE lead_id=? AND manager_id=?", (row['lead_id'], manager_id))
 
 
 async def remove_from_others(lead_id: str, except_id: str = None, note: str = "✅ Заявку вже взято в роботу"):
-    for m in get_all_msgs(lead_id):
+    for m in await get_all_msgs(lead_id):
         if m['manager_id'] == except_id:
             continue
         await edit_msg(m['manager_id'], lead_id, note)
 
 
 async def _delete_all_msgs(lead_id: str):
-    for m in get_all_msgs(lead_id):
+    for m in await get_all_msgs(lead_id):
         try:
             await state._app.bot.delete_message(chat_id=m['manager_id'], message_id=m['msg_id'])
         except Exception:
             pass
-        q("DELETE FROM messages WHERE lead_id=? AND manager_id=?", (lead_id, m['manager_id']))
+        await q("DELETE FROM messages WHERE lead_id=? AND manager_id=?", (lead_id, m['manager_id']))
 
 
 def schedule_cleanup(lead_id: str, delay: int = 30):
@@ -219,7 +219,7 @@ def schedule_delete_msg(manager_id: str, lead_id: str, delay: int = 30):
     """Видаляє смс конкретного менеджера через delay секунд."""
     async def _task():
         await asyncio.sleep(delay)
-        msg_id = get_msg_id(lead_id, manager_id)
+        msg_id = await get_msg_id(lead_id, manager_id)
         if not msg_id:
             return
         try:
@@ -234,7 +234,7 @@ async def cleanup_stale_messages() -> int:
     Видаляє в Telegram всі повідомлення по лідах зі статусом taken/duplicate/closed.
     Повертає кількість видалених повідомлень.
     """
-    rows = q("""
+    rows = await q("""
         SELECT m.manager_id, m.lead_id, m.msg_id
         FROM messages m
         JOIN leads l ON l.lead_id = m.lead_id
@@ -252,7 +252,7 @@ async def cleanup_stale_messages() -> int:
         except Exception:
             pass
         # Видаляємо запис незалежно від успіху — щоб не повторювати спробу наступного разу
-        q("DELETE FROM messages WHERE lead_id=? AND manager_id=?", (r['manager_id'], r['lead_id']))
+        await q("DELETE FROM messages WHERE lead_id=? AND manager_id=?", (r['manager_id'], r['lead_id']))
 
     if deleted:
         logger.info(f"cleanup_stale_messages: видалено {deleted} застарілих повідомлень")

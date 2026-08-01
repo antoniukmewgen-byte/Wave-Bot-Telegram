@@ -27,7 +27,7 @@ from notifications import (
     cleanup_stale_messages, remove_buttons_for_manager, delete_messages_for_manager,
     send_long_to_chat, _deactivate_blocked,
 )
-from sheets import fetch_managers, fetch_managers_async
+from sheets import fetch_managers_async
 
 import state
 
@@ -58,9 +58,9 @@ def build_broadcast_keyboard(lead_id: str) -> InlineKeyboardMarkup:
     ]])
 
 
-def _build_sent_map() -> dict:
+async def _build_sent_map() -> dict:
     """Скільки заявок зараз персонально відправлено кожному менеджеру (status='sent')."""
-    rows = q(
+    rows = await q(
         "SELECT manager_id, COUNT(*) as cnt FROM leads "
         "WHERE status = 'sent' AND manager_id IS NOT NULL "
         "GROUP BY manager_id",
@@ -69,7 +69,7 @@ def _build_sent_map() -> dict:
     return {r['manager_id']: r['cnt'] for r in rows} if rows else {}
 
 
-def _still_eligible(manager_id: str) -> bool:
+async def _still_eligible(manager_id: str) -> bool:
     """Свіжа перевірка прямо перед фактичною відправкою.
 
     Списки черги (avail_map/sent_map) можуть бути знімком стану на початок тіку,
@@ -78,30 +78,30 @@ def _still_eligible(manager_id: str) -> bool:
     handlers/manager.py). Ця перевірка закриває те вікно гонки: якщо менеджер
     вже зайнятий/недоступний — не надсилаємо йому ще одну заявку.
     """
-    if not is_available(manager_id):
+    if not await is_available(manager_id):
         return False
-    pending = q(
+    pending = await q(
         "SELECT COUNT(*) as cnt FROM leads WHERE status='sent' AND manager_id=?",
         (manager_id,), fetch='one',
     )
     return not (pending and pending['cnt'] > 0)
 
 
-def build_manager_status_text(managers: dict) -> str:
+async def build_manager_status_text(managers: dict) -> str:
     """
     Формує той самий текст, що і кнопка "👥 Статус менеджерів" в адмінці —
     винесено сюди, щоб використовувати і по кнопці, і в періодичній розсилці в чат.
     """
     month         = day_key()
-    connected_ids = {r['manager_id'] for r in get_connected()}
-    avail_map     = get_all_availability()
-    overrides     = get_all_max_leads_overrides()
-    taken_map     = get_all_taken(month)
-    sent_map      = _build_sent_map()
-    exit_reasons  = get_all_exit_reasons()
+    connected_ids = {r['manager_id'] for r in await get_connected()}
+    avail_map     = await get_all_availability()
+    overrides     = await get_all_max_leads_overrides()
+    taken_map     = await get_all_taken(month)
+    sent_map      = await _build_sent_map()
+    exit_reasons  = await get_all_exit_reasons()
 
     lines = ["👥 <b>Статус менеджерів:</b>\n"]
-    for name, tg_id in get_managers_dict().items():
+    for name, tg_id in (await get_managers_dict()).items():
         if tg_id not in managers:
             continue
         if tg_id not in connected_ids:
@@ -139,11 +139,11 @@ def build_manager_status_text(managers: dict) -> str:
 
 async def broadcast_manager_status():
     """Надсилає поточний статус менеджерів у всі чати, де увімкнена розсилка (/statuson)."""
-    chat_ids = get_status_chats()
+    chat_ids = await get_status_chats()
     if not chat_ids:
         return
     managers = await fetch_managers_async()
-    text     = build_manager_status_text(managers)
+    text     = await build_manager_status_text(managers)
     for chat_id in chat_ids:
         try:
             await send_long_to_chat(chat_id, text)
@@ -151,9 +151,9 @@ async def broadcast_manager_status():
             logger.warning(f"broadcast_manager_status: не вдалось надіслати в чат {chat_id}: {e}")
 
 
-def sorted_queue(
+async def sorted_queue(
+    managers: dict,
     exclude: list[str] = None,
-    managers: dict = None,
     taken_map: dict = None,
     avail_map: dict = None,
     overrides: dict = None,
@@ -161,19 +161,20 @@ def sorted_queue(
 ) -> list[str]:
     """
     Повертає список tg_id менеджерів у порядку черги.
+    managers — обов'язковий: fetch_managers() тепер async (gspread_asyncio),
+    тож синхронно всередині цієї функції отримати його вже не можна;
+    виклики нижче й так завжди передають managers явно.
     Прийняті ззовні taken_map/avail_map/overrides/sent_map дозволяють
     уникнути зайвих запитів до БД, якщо черга будується для багатьох лідів підряд.
     """
-    if managers is None:
-        managers = fetch_managers()
     if taken_map is None:
-        taken_map = get_all_taken(day_key())
+        taken_map = await get_all_taken(day_key())
     if avail_map is None:
-        avail_map = get_all_availability()
+        avail_map = await get_all_availability()
     if overrides is None:
-        overrides = get_all_max_leads_overrides()
+        overrides = await get_all_max_leads_overrides()
     if sent_map is None:
-        sent_map = _build_sent_map()
+        sent_map = await _build_sent_map()
 
     exclude = set(exclude or [])
 
@@ -201,16 +202,16 @@ async def assign_next(lead_id: str, exclude: list[str] = None):
     # і передаємо в sorted_queue, щоб вона не робила це сама синхронно всередині.
     managers = await fetch_managers_async()
     try:
-        queue = sorted_queue(exclude=exclude, managers=managers)
+        queue = await sorted_queue(exclude=exclude, managers=managers)
     except Exception as e:
         await notify_admin_error("assign_next (читання черги)", e)
         return
 
     if not queue:
         logger.warning(f"Заявка {lead_id}: немає вільних менеджерів")
-        lead = get_lead(lead_id)
+        lead = await get_lead(lead_id)
         if lead and lead['status'] == 'queued':
-            q("UPDATE leads SET status='no_managers' WHERE lead_id=?", (lead_id,))
+            await q("UPDATE leads SET status='no_managers' WHERE lead_id=?", (lead_id,))
             await notify_admins(
                 f"⚠️ <b>Немає вільних менеджерів!</b>\n\n"
                 f"{lead['title']} не розподілена.\n"
@@ -221,7 +222,7 @@ async def assign_next(lead_id: str, exclude: list[str] = None):
     manager_id   = queue[0]
     manager_name = managers.get(manager_id, {}).get('name', 'Менеджер')
 
-    lead = get_lead(lead_id)
+    lead = await get_lead(lead_id)
     if not lead:
         return
 
@@ -229,7 +230,7 @@ async def assign_next(lead_id: str, exclude: list[str] = None):
     # менеджер міг узяти іншу заявку в роботу (закриваємо вікно гонки).
     # ВАЖЛИВО: цю перевірку треба робити ДО claim_lead_for_send, інакше вона
     # рахує щойно заброньовану цю саму заявку як "pending" і завжди повертає False.
-    if not _still_eligible(manager_id):
+    if not await _still_eligible(manager_id):
         logger.info(
             f"assign_next: {manager_name} ({manager_id}) став зайнятий за час побудови черги — "
             f"пропускаємо, заявка {lead_id} лишається в черзі"
@@ -237,7 +238,7 @@ async def assign_next(lead_id: str, exclude: list[str] = None):
         return
 
     # Атомарно бронюємо заявку ПЕРЕД відправкою — захист від паралельних assign_next
-    if not claim_lead_for_send(lead_id, manager_id):
+    if not await claim_lead_for_send(lead_id, manager_id):
         logger.info(f"assign_next: заявка {lead_id} вже зайнята іншим менеджером — пропускаємо")
         return
 
@@ -247,7 +248,7 @@ async def assign_next(lead_id: str, exclude: list[str] = None):
         logger.info(f"Заявка {lead_id} → {manager_name} ({manager_id})")
     except Exception as e:
         # Повертаємо заявку в чергу якщо відправка не вдалась
-        q("UPDATE leads SET status='queued', manager_id=NULL, sent_at=NULL WHERE lead_id=?", (lead_id,))
+        await q("UPDATE leads SET status='queued', manager_id=NULL, sent_at=NULL WHERE lead_id=?", (lead_id,))
         logger.error(f"assign_next відправка {lead_id} → {manager_id}: {e}")
         await notify_admin_error(f"assign_next (відправка заявки #{lead_id})", e, manager_id)
 
@@ -259,7 +260,7 @@ async def handle_manager_exit(manager_id: str):
     ("sent") заявки, повертає їх у чергу та передає іншому менеджеру —
     так само як це робить дія 'skip'.
     """
-    rows = q("""
+    rows = await q("""
         SELECT lead_id FROM leads
         WHERE manager_id = ? AND status = 'sent'
     """, (manager_id,), fetch='all')
@@ -268,10 +269,10 @@ async def handle_manager_exit(manager_id: str):
     await delete_messages_for_manager(manager_id)
 
     for lead_id in personal_leads:
-        lead = get_lead(lead_id)
+        lead = await get_lead(lead_id)
         if lead and lead['status'] == 'sent' and lead['manager_id'] == manager_id:
-            q("UPDATE leads SET status='queued', manager_id=NULL, sent_at=NULL WHERE lead_id=?", (lead_id,))
-            await assign_next(lead_id, exclude=get_skipped(lead_id))
+            await q("UPDATE leads SET status='queued', manager_id=NULL, sent_at=NULL WHERE lead_id=?", (lead_id,))
+            await assign_next(lead_id, exclude=await get_skipped(lead_id))
 
 
 async def cleanup_orphaned_manager_messages() -> int:
@@ -288,12 +289,12 @@ async def cleanup_orphaned_manager_messages() -> int:
 
     Повертає кількість менеджерів, для яких було що прибирати.
     """
-    avail_map = get_all_availability()
+    avail_map = await get_all_availability()
     inactive  = [mid for mid, active in avail_map.items() if not active]
 
     cleaned = 0
     for manager_id in inactive:
-        row = q("""
+        row = await q("""
             SELECT COUNT(*) as cnt FROM messages m
             JOIN leads l ON l.lead_id = m.lead_id
             WHERE m.manager_id = ?
@@ -313,26 +314,26 @@ async def broadcast_to_all(lead_id: str, **tick_ctx):
     Розіслати заявку всім вільним менеджерам.
     Статус завжди переходить в broadcast, але надсилання блокується якщо вже є активна broadcast заявка.
     """
-    lead = get_lead(lead_id)
+    lead = await get_lead(lead_id)
     if not lead or lead['status'] in ('taken', 'duplicate', 'closed'):
         return
 
     orig_manager = lead['manager_id']
-    skipped      = get_skipped(lead_id)
+    skipped      = await get_skipped(lead_id)
     text         = f"{lead['title']}\n👤 <i>Відкрита черга</i>"
     kb           = build_broadcast_keyboard(lead_id)
 
     # Активна broadcast — та що вже реально надіслана всім (є sent_at)
-    active_broadcast = q(
+    active_broadcast = await q(
         "SELECT lead_id FROM leads WHERE status='broadcast' AND sent_at IS NOT NULL AND lead_id != ? LIMIT 1",
         (lead_id,), fetch='one',
     )
 
     if active_broadcast:
         # sent_at=NULL щоб ескалація не починалась поки не надіслана реально
-        q("UPDATE leads SET status='broadcast', esc_level=1, sent_at=NULL WHERE lead_id=?", (lead_id,))
+        await q("UPDATE leads SET status='broadcast', esc_level=1, sent_at=NULL WHERE lead_id=?", (lead_id,))
         if orig_manager:
-            msg_id = get_msg_id(lead_id, orig_manager)
+            msg_id = await get_msg_id(lead_id, orig_manager)
             if msg_id:
                 try:
                     await state._app.bot.delete_message(chat_id=orig_manager, message_id=msg_id)
@@ -340,22 +341,22 @@ async def broadcast_to_all(lead_id: str, **tick_ctx):
                     logger.debug(f"broadcast queue: не вдалось видалити повідомлення у {orig_manager}: {e}")
                 # Видаляємо запис з messages незалежно від успіху видалення TG-повідомлення
                 # (уникаємо "привидів" — записів без реального повідомлення в Telegram)
-                delete_msg(lead_id, orig_manager)
+                await delete_msg(lead_id, orig_manager)
         logger.info(f"Заявка {lead_id}: перейшла в broadcast, чекає черги (активна: {active_broadcast['lead_id']})")
         return
 
     exclude = list(set(skipped + ([orig_manager] if orig_manager else [])))
-    queue   = sorted_queue(exclude=exclude, **tick_ctx)
+    queue   = await sorted_queue(exclude=exclude, **tick_ctx)
 
     if orig_manager:
         await delete_and_send(orig_manager, lead_id, text, kb)
 
     for mid in queue:
-        if not _still_eligible(mid):
+        if not await _still_eligible(mid):
             continue
         await delete_and_send(mid, lead_id, text, kb)
 
-    q("UPDATE leads SET status='broadcast', esc_level=1, sent_at=? WHERE lead_id=?",
+    await q("UPDATE leads SET status='broadcast', esc_level=1, sent_at=? WHERE lead_id=?",
       (datetime.now().timestamp(), lead_id))
     logger.info(f"Заявка {lead_id} розіслана всім ({len(queue)} менеджерів)")
 
@@ -376,7 +377,7 @@ async def restore_buttons_for_manager(manager_id: str):
     Також надсилає broadcast заявки що вже активні але ще не приходили цьому менеджеру."""
 
     # 1. Відновлюємо кнопки на вже надісланих повідомленнях
-    rows = q("""
+    rows = await q("""
         SELECT l.* FROM leads l
         JOIN messages m ON m.lead_id = l.lead_id
         WHERE m.manager_id = ?
@@ -388,7 +389,7 @@ async def restore_buttons_for_manager(manager_id: str):
         await edit_msg(manager_id, lead['lead_id'], text, keyboard=build_keyboard(lead['lead_id']))
 
     # 2. Надсилаємо активні broadcast заявки що ще не приходили цьому менеджеру
-    broadcast_leads = q("""
+    broadcast_leads = await q("""
         SELECT l.* FROM leads l
         WHERE l.status = 'broadcast'
           AND l.sent_at IS NOT NULL
@@ -409,31 +410,28 @@ async def restore_buttons_for_manager(manager_id: str):
             logger.error(f"restore: не вдалось надіслати {lead['lead_id']} → {manager_id}: {e}")
 
 
-def _update_offline(queue_set: set, lead_id: str, text: str):
-    """Повертає coroutine-список для оновлення смс менеджерів поза чергою (без кнопок)."""
-    return [
-        edit_msg(m['manager_id'], lead_id, text)
-        for m in get_all_msgs(lead_id)
-        if m['manager_id'] not in queue_set
-    ]
+async def _update_offline(queue_set: set, lead_id: str, text: str):
+    """Оновлює смс менеджерів поза чергою (без кнопок)."""
+    for m in await get_all_msgs(lead_id):
+        if m['manager_id'] not in queue_set:
+            await edit_msg(m['manager_id'], lead_id, text)
 
 
 async def _escalate(lead_id: str, text: str, sql: str, sql_params: tuple, log_msg: str, **tick_ctx):
     """Спільна механіка розсилки для escalate_warn/escalate_sos/rebroadcast_periodic:
     надіслати всій черзі, оновити офлайн-повідомлення без кнопок, записати новий стан."""
-    lead = get_lead(lead_id)
+    lead = await get_lead(lead_id)
     if not lead or lead['status'] in ('taken', 'duplicate', 'closed'):
         return
     kb        = build_broadcast_keyboard(lead_id)
-    queue     = sorted_queue(exclude=get_skipped(lead_id), **tick_ctx)
+    queue     = await sorted_queue(exclude=await get_skipped(lead_id), **tick_ctx)
     queue_set = set(queue)
     for mid in queue:
-        if not _still_eligible(mid):
+        if not await _still_eligible(mid):
             continue
         await delete_and_send(mid, lead_id, text, kb)
-    for coro in _update_offline(queue_set, lead_id, text):
-        await coro
-    q(sql, sql_params)
+    await _update_offline(queue_set, lead_id, text)
+    await q(sql, sql_params)
     logger.info(log_msg)
 
 
@@ -480,7 +478,7 @@ async def rebroadcast_periodic(lead_id: str, title: str, **tick_ctx):
 
 async def _send_next_queued_broadcast(**tick_ctx):
     """Надсилає наступну broadcast заявку що чекає своєї черги (якщо немає активної)."""
-    active = q(
+    active = await q(
         "SELECT 1 FROM leads WHERE status='broadcast' AND sent_at IS NOT NULL LIMIT 1",
         fetch='one',
     )
@@ -488,14 +486,14 @@ async def _send_next_queued_broadcast(**tick_ctx):
         return
 
     # Затримка 10с після того як хтось взяв лід — щоб не засипати менеджера одразу
-    recent = q(
+    recent = await q(
         "SELECT MAX(taken_at) as last FROM leads WHERE taken_at IS NOT NULL",
         fetch='one',
     )
     if recent and recent['last'] and datetime.now().timestamp() - recent['last'] < 10:
         return
 
-    waiting = q(
+    waiting = await q(
         "SELECT * FROM leads WHERE status='broadcast' AND sent_at IS NULL ORDER BY created_at DESC LIMIT 1",
         fetch='one',
     )
@@ -503,11 +501,11 @@ async def _send_next_queued_broadcast(**tick_ctx):
         return
 
     orig_manager = waiting['manager_id']
-    skipped      = get_skipped(waiting['lead_id'])
+    skipped      = await get_skipped(waiting['lead_id'])
     text         = f"{waiting['title']}\n👤 <i>Відкрита черга</i>"
     kb           = build_broadcast_keyboard(waiting['lead_id'])
     exclude      = list(set(skipped + ([orig_manager] if orig_manager else [])))
-    queue        = sorted_queue(exclude=exclude, **tick_ctx)
+    queue        = await sorted_queue(exclude=exclude, **tick_ctx)
 
     if orig_manager:
         await delete_and_send(orig_manager, waiting['lead_id'], text, kb)
@@ -515,7 +513,7 @@ async def _send_next_queued_broadcast(**tick_ctx):
     for mid in queue:
         await delete_and_send(mid, waiting['lead_id'], text, kb)
 
-    q("UPDATE leads SET sent_at=? WHERE lead_id=?",
+    await q("UPDATE leads SET sent_at=? WHERE lead_id=?",
       (datetime.now().timestamp(), waiting['lead_id']))
     logger.info(f"Заявка {waiting['lead_id']} надіслана всім з черги broadcast ({len(queue)} менеджерів)")
 
@@ -528,7 +526,7 @@ async def _tick():
 
     async with _tick_lock:
         now   = datetime.now().timestamp()
-        leads = q(
+        leads = await q(
             "SELECT * FROM leads WHERE status NOT IN ('taken','duplicate','closed') ORDER BY created_at DESC",
             fetch='all',
         )
@@ -536,10 +534,10 @@ async def _tick():
             return
 
         managers  = await fetch_managers_async()
-        taken_map = get_all_taken(day_key())
-        avail_map = get_all_availability()
-        overrides = get_all_max_leads_overrides()
-        sent_map  = _build_sent_map()
+        taken_map = await get_all_taken(day_key())
+        avail_map = await get_all_availability()
+        overrides = await get_all_max_leads_overrides()
+        sent_map  = await _build_sent_map()
         tick_ctx  = dict(
             managers=managers,
             taken_map=taken_map,
@@ -626,7 +624,7 @@ async def _check_schedules():
     yesterday    = (weekday - 1) % 7
     current_time = now.strftime('%H:%M')
 
-    schedules = get_all_schedules()
+    schedules = await get_all_schedules()
     for manager_id, sch in schedules.items():
         if not sch.get('enabled', 1):
             continue
@@ -645,8 +643,8 @@ async def _check_schedules():
         if current_time == end:
             working_day = yesterday if crosses else weekday
             if working_day in days:
-                if is_available(manager_id) or get_exit_reason(manager_id) == 'has_distributed':
-                    set_availability(manager_id, False, reason='schedule')
+                if await is_available(manager_id) or await get_exit_reason(manager_id) == 'has_distributed':
+                    await set_availability(manager_id, False, reason='schedule')
                     await handle_manager_exit(manager_id)
                     name = state.MANAGERS_BY_ID.get(manager_id, manager_id)
                     try:
@@ -669,30 +667,30 @@ async def _check_schedules():
             continue
 
         name = state.MANAGERS_BY_ID.get(manager_id, manager_id)
-        update_last_notified(manager_id, today)
+        await update_last_notified(manager_id, today)
 
         # Якщо менеджер вже в черзі — мовчки відмічаємо як повідомлений
-        if is_available(manager_id):
+        if await is_available(manager_id):
             logger.info(f"Schedule: {name} вже в черзі — нагадування пропущено")
             continue
 
         asyncio.create_task(_send_shift_reminder(manager_id, name))
 
 
-def _reset_limit_overrides():
-    reset_all_limit_overrides()
+async def _reset_limit_overrides():
+    await reset_all_limit_overrides()
     logger.info("Ручні ліміти скинуто (новий день)")
 
 
-def _cleanup_old_records():
+async def _cleanup_old_records():
     """Видаляє записи старші за 2 місяці."""
     now       = datetime.now()
     keep_from = (now.replace(day=1) - timedelta(days=1)).replace(day=1).strftime('%Y-%m')
-    q("DELETE FROM stats WHERE month < ?", (keep_from,))
-    q("DELETE FROM leads WHERE created_at < ? AND status IN ('taken','duplicate','closed')",
+    await q("DELETE FROM stats WHERE month < ?", (keep_from,))
+    await q("DELETE FROM leads WHERE created_at < ? AND status IN ('taken','duplicate','closed')",
       (datetime.now().timestamp() - 60 * 24 * 3600,))
-    q("DELETE FROM messages WHERE lead_id NOT IN (SELECT lead_id FROM leads)")
-    q("DELETE FROM skipped  WHERE lead_id NOT IN (SELECT lead_id FROM leads)")
+    await q("DELETE FROM messages WHERE lead_id NOT IN (SELECT lead_id FROM leads)")
+    await q("DELETE FROM skipped  WHERE lead_id NOT IN (SELECT lead_id FROM leads)")
     logger.info(f"БД: очищено записи до {keep_from}")
 
 
@@ -702,11 +700,11 @@ async def deactivate_out_of_schedule():
     weekday      = now.weekday()
     current_time = now.strftime('%H:%M')
 
-    schedules = get_all_schedules()
+    schedules = await get_all_schedules()
     for manager_id, sch in schedules.items():
         if not sch.get('enabled', 1):
             continue
-        if not is_available(manager_id) and get_exit_reason(manager_id) != 'has_distributed':
+        if not await is_available(manager_id) and await get_exit_reason(manager_id) != 'has_distributed':
             continue
 
         days    = [int(d) for d in sch['days'].split(',') if d.strip()]
@@ -714,7 +712,7 @@ async def deactivate_out_of_schedule():
         end     = sch.get('end_time', '23:00')
 
         if not _in_shift(current_time, weekday, days, start, end):
-            set_availability(manager_id, False, reason='schedule')
+            await set_availability(manager_id, False, reason='schedule')
             await handle_manager_exit(manager_id)
             name = state.MANAGERS_BY_ID.get(manager_id, manager_id)
             logger.info(f"Старт: {name} поза робочим часом → виведено з черги")
@@ -757,11 +755,11 @@ async def _run_minute_checks():
 
 
 async def _run_daily_reset():
-    _reset_limit_overrides()
+    await _reset_limit_overrides()
 
 
 async def _run_monthly_cleanup():
-    _cleanup_old_records()
+    await _cleanup_old_records()
 
 
 def build_scheduler() -> AsyncIOScheduler:
@@ -816,15 +814,15 @@ async def on_lead_distributed(lead_id: str):
         logger.warning(f"on_lead_distributed: не вдалось отримати responsible для заявки {lead_id}")
         return
 
+    all_managers = await get_all_managers(approved_only=True)
     mgr = next(
-        (m for m in get_all_managers(approved_only=True)
-         if m['kommo_id'] == responsible_kommo_id),
+        (m for m in all_managers if m['kommo_id'] == responsible_kommo_id),
         None,
     )
     new_manager_id = mgr['tg_id'] if mgr else None
 
     # Лід вже був закріплений за кимось раніше — перевіряємо, чи це той самий
-    existing = get_distributed_lead(lead_id)
+    existing = await get_distributed_lead(lead_id)
     if existing and existing['manager_id'] != new_manager_id:
         # Відповідального змінили, поки лід лишався в 'Распределены' —
         # звільняємо старого менеджера (і переносимо йому лічильник взятого)
@@ -844,11 +842,11 @@ async def on_lead_distributed(lead_id: str):
     manager_id = new_manager_id
     name       = mgr['sheet_name'] or mgr['tg_name'] or manager_id
 
-    add_distributed_lead(lead_id, manager_id)
+    await add_distributed_lead(lead_id, manager_id)
     # Виводимо з черги тільки якщо менеджер зараз активний —
     # якщо він вже вийшов вручну або за розкладом, не перетираємо його причину виходу
-    if is_available(manager_id):
-        set_availability(manager_id, False, reason='has_distributed')
+    if await is_available(manager_id):
+        await set_availability(manager_id, False, reason='has_distributed')
     # Знімаємо кнопки з усіх активних заявок що вже надіслані менеджеру
     await remove_buttons_for_manager(manager_id)
     logger.info(f"on_lead_distributed: {name} ({manager_id}) → виведено з черги (заявка {lead_id})")
@@ -875,22 +873,22 @@ async def _release_reassigned_manager(lead_id: str, old_manager_id: str, new_man
     якщо у старого менеджера більше немає інших розподілених лідів,
     повертаємо його в чергу (тільки якщо exit_reason саме 'has_distributed').
     """
-    remove_distributed_lead(lead_id)
-    transfer_taken(old_manager_id, new_manager_id, day_key())
+    await remove_distributed_lead(lead_id)
+    await transfer_taken(old_manager_id, new_manager_id, day_key())
 
-    remaining = count_distributed_leads(old_manager_id)
+    remaining = await count_distributed_leads(old_manager_id)
     if remaining > 0:
         logger.info(
             f"on_lead_distributed (переприз.): {old_manager_id} ще має {remaining} заявок у 'Распределены'"
         )
         return
 
-    mgr = get_manager(old_manager_id)
+    mgr = await get_manager(old_manager_id)
     if not mgr:
         return
     name = mgr['sheet_name'] or mgr['tg_name'] or old_manager_id
 
-    exit_reason = get_exit_reason(old_manager_id)
+    exit_reason = await get_exit_reason(old_manager_id)
     if exit_reason is not None and exit_reason != 'has_distributed':
         logger.info(
             f"on_lead_distributed (переприз.): {name} ({old_manager_id}) — не в черзі з іншої причини "
@@ -898,7 +896,7 @@ async def _release_reassigned_manager(lead_id: str, old_manager_id: str, new_man
         )
         return
 
-    set_availability(old_manager_id, True)
+    await set_availability(old_manager_id, True)
     logger.info(
         f"on_lead_distributed (переприз.): {name} ({old_manager_id}) → "
         f"заявку {lead_id} передано іншому, повернуто в чергу"
@@ -922,16 +920,16 @@ async def on_lead_undistributed(lead_id: str, manager_id: str):
     Викликається коли заявка покидає статус 'Распределены'.
     Якщо у менеджера більше немає таких заявок — повертає його в чергу.
     """
-    remove_distributed_lead(lead_id)
+    await remove_distributed_lead(lead_id)
 
-    remaining = count_distributed_leads(manager_id)
+    remaining = await count_distributed_leads(manager_id)
     if remaining > 0:
         logger.info(
             f"on_lead_undistributed: {manager_id} ще має {remaining} заявок у 'Распределены'"
         )
         return
 
-    mgr = get_manager(manager_id)
+    mgr = await get_manager(manager_id)
     if not mgr:
         return
 
@@ -939,7 +937,7 @@ async def on_lead_undistributed(lead_id: str, manager_id: str):
 
     # Повертаємо в чергу тільки якщо причина виходу саме 'has_distributed' —
     # якщо менеджер вийшов вручну або за розкладом поки заявка була distributed, не чіпаємо
-    exit_reason = get_exit_reason(manager_id)
+    exit_reason = await get_exit_reason(manager_id)
     if exit_reason is not None and exit_reason != 'has_distributed':
         logger.info(
             f"on_lead_undistributed: {name} ({manager_id}) — не в черзі з іншої причини "
@@ -947,7 +945,7 @@ async def on_lead_undistributed(lead_id: str, manager_id: str):
         )
         return
 
-    set_availability(manager_id, True)
+    await set_availability(manager_id, True)
     logger.info(f"on_lead_undistributed: {name} ({manager_id}) → повернуто в чергу")
 
     try:

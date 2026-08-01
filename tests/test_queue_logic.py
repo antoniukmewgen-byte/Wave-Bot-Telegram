@@ -8,8 +8,8 @@ MANAGERS = {
 }
 
 
-def test_sorted_queue_orders_by_taken_count():
-    queue = sorted_queue(
+async def test_sorted_queue_orders_by_taken_count():
+    queue = await sorted_queue(
         managers=MANAGERS,
         taken_map={'a': 3, 'b': 1, 'c': 0},
         avail_map={'a': True, 'b': True, 'c': True},
@@ -19,8 +19,8 @@ def test_sorted_queue_orders_by_taken_count():
     assert queue == ['c', 'b', 'a']
 
 
-def test_sorted_queue_excludes_unavailable_and_pending():
-    queue = sorted_queue(
+async def test_sorted_queue_excludes_unavailable_and_pending():
+    queue = await sorted_queue(
         managers=MANAGERS,
         taken_map={'a': 0, 'b': 0, 'c': 0},
         avail_map={'a': True, 'b': False, 'c': True},
@@ -31,8 +31,8 @@ def test_sorted_queue_excludes_unavailable_and_pending():
     assert queue == ['a']
 
 
-def test_sorted_queue_respects_max_leads_override():
-    queue = sorted_queue(
+async def test_sorted_queue_respects_max_leads_override():
+    queue = await sorted_queue(
         managers=MANAGERS,
         taken_map={'a': 0, 'b': 0, 'c': 2},
         avail_map={'a': True, 'b': True, 'c': True},
