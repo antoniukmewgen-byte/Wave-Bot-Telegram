@@ -143,17 +143,42 @@ async def on_work_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"{name} {'увійшов в чергу' if active else 'вийшов з черги'}")
 
 
+async def _safe_answer(query, *args, **kwargs):
+    """Обгортка над query.answer(), яка ніколи не проброшує BadRequest далі.
+
+    Проблема, яку це усуває: callback_query.answer() лише гасить спінер
+    завантаження в Telegram-клієнті — не критична дія. Але якщо колбек
+    "протух" (>10 хв бездіяльності) або вже був оброблений раніше, answer()
+    кидає BadRequest("query is too old"/"query id is invalid"). У on_callback
+    цей виклик стоїть ПОСЕРЕД ланцюжка дій, і до нього вже могли відбутись
+    критичні зміни стану (take_lead, add_distributed_lead, mark_skipped тощо) —
+    якщо дати винятку тут пробитись до зовнішнього except, усе, що йде ПІСЛЯ
+    answer() (підтвердження менеджеру, синк відповідального в Kommo,
+    сповіщення інших менеджерів/адмінів), просто не виконається, хоча БД вже
+    змінена. Тому тут помилка лише логується — виконання продовжується.
+    """
+    try:
+        await query.answer(*args, **kwargs)
+    except BadRequest as e:
+        if 'query is too old' in str(e).lower() or 'query id is invalid' in str(e).lower():
+            logger.warning(f"_safe_answer: callback протух — {e}")
+        else:
+            logger.error(f"_safe_answer: {e}")
+    except Exception as e:
+        logger.error(f"_safe_answer: {e}")
+
+
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
 
     if query.data.startswith('setlim:'):
-        await query.answer()
+        await _safe_answer(query)
         return
 
     try:
         action, lead_id = query.data.split(':', 1)
     except ValueError:
-        await query.answer()
+        await _safe_answer(query)
         return
 
     manager_id = str(query.from_user.id)
@@ -163,13 +188,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             name = state.MANAGERS_BY_ID.get(manager_id)
             if not name:
-                await query.answer()
+                await _safe_answer(query)
                 return
             active = (lead_id == 'on')
             if active:
                 pending = await get_manager_distributed_leads(manager_id)
                 if pending:
-                    await query.answer()
+                    await _safe_answer(query)
                     await query.edit_message_text(
                         f"👤 <b>{name}</b>\n\n{_still_distributed_text(pending)}",
                         reply_markup=work_keyboard(False),
@@ -178,7 +203,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
 
             await set_availability(manager_id, active, reason=None if active else 'manual')
-            await query.answer()
+            await _safe_answer(query)
             status = "✅ Ви в черзі — заявки надходитимуть" if active else "🚫 Ви вийшли з черги — заявки не надходитимуть"
             await query.edit_message_text(
                 f"👤 <b>{name}</b>\n\n{status}\n\nЩоб змінити — напишіть /work",
@@ -193,18 +218,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"on_callback work: {e}")
             try:
-                await query.answer()
+                await _safe_answer(query)
             except Exception:
                 pass
         return
 
     lead = await get_lead(lead_id)
     if not lead:
-        await query.answer("⚠️ Заявка не знайдена", show_alert=True)
+        await _safe_answer(query, "⚠️ Заявка не знайдена", show_alert=True)
         return
 
     if lead['status'] in ('taken', 'duplicate', 'closed'):
-        await query.answer("❌ Цю заявку вже оброблено", show_alert=True)
+        await _safe_answer(query, "❌ Цю заявку вже оброблено", show_alert=True)
         await edit_msg(manager_id, lead_id, "❌ Цю заявку вже оброблено")
         return
 
@@ -214,7 +239,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if action in ('take', 't'):
             if not await is_available(manager_id) or manager_id not in managers:
-                await query.answer("⛔ Ви поза чергою — заявку взяти неможливо", show_alert=True)
+                await _safe_answer(query, "⛔ Ви поза чергою — заявку взяти неможливо", show_alert=True)
                 return
 
             mgr_info  = managers.get(manager_id, {})
@@ -224,12 +249,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if max_leads is not None:
                 taken_today = await get_taken(manager_id, day_key())
                 if taken_today >= max_leads:
-                    await query.answer("⛔ Ви вже взяли максимальну кількість лідів на сьогодні", show_alert=True)
+                    await _safe_answer(query, "⛔ Ви вже взяли максимальну кількість лідів на сьогодні", show_alert=True)
                     await edit_msg(manager_id, lead_id, f"⛔ Ліміт вичерпано ({taken_today}/{max_leads})\n\n{lead['title']}")
                     return
 
             if not await take_lead(lead_id, manager_id, day_key()):
-                await query.answer("❌ Заявку вже взяв інший менеджер", show_alert=True)
+                await _safe_answer(query, "❌ Заявку вже взяв інший менеджер", show_alert=True)
                 await edit_msg(manager_id, lead_id, "❌ Заявку вже взяв інший менеджер")
                 return
 
@@ -241,7 +266,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await set_availability(manager_id, False, reason='has_distributed')
                 await remove_buttons_for_manager(manager_id)
 
-            await query.answer()
+            await _safe_answer(query)
             await edit_msg(manager_id, lead_id, f"✅ Ви взяли заявку в роботу!\n\n{lead['title']}")
 
             kommo_ok = await set_kommo_responsible(lead_id, manager_id)
@@ -264,13 +289,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif action in ('skip', 's'):
             if not await is_available(manager_id):
-                await query.answer(
+                await _safe_answer(
+                    query,
                     "⛔ Ви поза чергою. Щоб взаємодіяти із заявками — спочатку увійдіть у чергу (/work)",
                     show_alert=True,
                 )
                 return
 
-            await query.answer()
+            await _safe_answer(query)
             await mark_skipped(lead_id, manager_id)
             await edit_msg(manager_id, lead_id, f"⏭ Ви відмовились від заявки\n\n{lead['title']}")
             schedule_delete_msg(manager_id, lead_id)
@@ -283,13 +309,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif action in ('dup', 'd'):
             if not await is_available(manager_id):
-                await query.answer(
+                await _safe_answer(
+                    query,
                     "⛔ Ви поза чергою. Щоб взаємодіяти із заявками — спочатку увійдіть у чергу (/work)",
                     show_alert=True,
                 )
                 return
 
-            await query.answer()
+            await _safe_answer(query)
             await q("UPDATE leads SET status='duplicate' WHERE lead_id=?", (lead_id,))
             await edit_msg(manager_id, lead_id, "🔁 Ви позначили заявку як дубль")
             await remove_from_others(lead_id, except_id=manager_id, note="🔁 Заявка закрита як дубль")
@@ -297,7 +324,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"Заявка {lead_id} — дубль ({mgr_name})")
 
         else:
-            await query.answer()
+            await _safe_answer(query)
 
     except BadRequest as e:
         # Callback query протух (>10 хв) або вже оброблений — не спамимо адміну
@@ -309,7 +336,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"on_callback {action} {lead_id}: {e}")
         try:
-            await query.answer()
+            await _safe_answer(query)
         except Exception:
             pass
         await notify_admin_error(f"on_callback (дія: {action}, заявка: {lead_id})", e, manager_id)
