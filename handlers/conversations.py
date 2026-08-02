@@ -10,6 +10,7 @@ from db import (
     get_all_max_leads_overrides, get_all_schedules, set_max_leads_override, set_schedule,
     get_managers_dict, upsert_manager, get_manager, get_all_managers,
 )
+from notifications import safe_answer
 from sheets import fetch_managers_async
 
 logger = logging.getLogger(__name__)
@@ -66,7 +67,7 @@ async def limits_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def limits_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
 
     if query.data == "setlim:cancel":
         await query.edit_message_text("❌ Скасовано")
@@ -154,7 +155,7 @@ async def schedules_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def schedules_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     tg_id = query.data.split(':', 1)[1]
 
     if tg_id == 'cancel':
@@ -285,7 +286,7 @@ async def schedules_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Крок 1 — вибір імені зі Sheets."""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
 
     tg_id = str(query.from_user.id)
 
@@ -338,7 +339,7 @@ async def reg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reg_select_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Крок 2 — вибір акаунту в Kommo."""
     query      = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     sheet_name = query.data.split(':', 1)[1]
     tg_id      = str(query.from_user.id)
 
@@ -375,7 +376,7 @@ async def reg_select_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reg_select_kommo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Крок 3 — збереження та відправка на схвалення."""
     query      = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     tg_id      = str(query.from_user.id)
     sheet_name = context.user_data.get('reg_sheet_name', '')
 

@@ -6,7 +6,7 @@ from telegram.ext import ContextTypes
 import state
 from config import ADMIN_IDS
 from db import approve_manager, delete_manager, get_manager, get_managers_dict
-from notifications import notify_admins
+from notifications import notify_admins, safe_answer
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +17,10 @@ async def on_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin_id = str(query.from_user.id)
 
     if admin_id not in ADMIN_IDS:
-        await query.answer("⛔ Тільки для адміністраторів", show_alert=True)
+        await safe_answer(query, "⛔ Тільки для адміністраторів", show_alert=True)
         return
 
-    await query.answer()
+    await safe_answer(query)
     action, tg_id = query.data.split(':', 1)
 
     mgr = await get_manager(tg_id)

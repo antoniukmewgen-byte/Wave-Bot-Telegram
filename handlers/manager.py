@@ -13,7 +13,7 @@ from db import (
     get_last_connected_ts, get_manager, get_manager_distributed_leads, add_distributed_lead,
 )
 from kommo import set_kommo_responsible
-from notifications import notify_admins, notify_admin_error, edit_msg, remove_from_others, schedule_cleanup, schedule_delete_msg, remove_buttons_for_manager
+from notifications import notify_admins, notify_admin_error, edit_msg, remove_from_others, schedule_cleanup, schedule_delete_msg, remove_buttons_for_manager, safe_answer as _safe_answer
 from queue_logic import assign_next, day_key, build_keyboard, restore_buttons_for_manager, handle_manager_exit
 from sheets import fetch_managers_async, get_block_reason
 
@@ -141,31 +141,6 @@ async def on_work_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await handle_manager_exit(user_id)
     logger.info(f"{name} {'увійшов в чергу' if active else 'вийшов з черги'}")
-
-
-async def _safe_answer(query, *args, **kwargs):
-    """Обгортка над query.answer(), яка ніколи не проброшує BadRequest далі.
-
-    Проблема, яку це усуває: callback_query.answer() лише гасить спінер
-    завантаження в Telegram-клієнті — не критична дія. Але якщо колбек
-    "протух" (>10 хв бездіяльності) або вже був оброблений раніше, answer()
-    кидає BadRequest("query is too old"/"query id is invalid"). У on_callback
-    цей виклик стоїть ПОСЕРЕД ланцюжка дій, і до нього вже могли відбутись
-    критичні зміни стану (take_lead, add_distributed_lead, mark_skipped тощо) —
-    якщо дати винятку тут пробитись до зовнішнього except, усе, що йде ПІСЛЯ
-    answer() (підтвердження менеджеру, синк відповідального в Kommo,
-    сповіщення інших менеджерів/адмінів), просто не виконається, хоча БД вже
-    змінена. Тому тут помилка лише логується — виконання продовжується.
-    """
-    try:
-        await query.answer(*args, **kwargs)
-    except BadRequest as e:
-        if 'query is too old' in str(e).lower() or 'query id is invalid' in str(e).lower():
-            logger.warning(f"_safe_answer: callback протух — {e}")
-        else:
-            logger.error(f"_safe_answer: {e}")
-    except Exception as e:
-        logger.error(f"_safe_answer: {e}")
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):

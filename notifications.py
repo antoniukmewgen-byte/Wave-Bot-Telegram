@@ -2,13 +2,39 @@ import asyncio
 import logging
 
 from tenacity import retry, retry_if_exception_type, stop_after_attempt
-from telegram.error import Forbidden, RetryAfter, TimedOut, NetworkError
+from telegram.error import BadRequest, Forbidden, RetryAfter, TimedOut, NetworkError
 
 import state
 from config import ADMIN_IDS
 from db import q, get_msg_id, save_msg, get_all_msgs, set_availability, delete_manager, set_msg_active
 
 logger = logging.getLogger(__name__)
+
+
+async def safe_answer(query, *args, **kwargs):
+    """Обгортка над query.answer(), яка ніколи не проброшує виняток далі.
+
+    Проблема, яку це усуває: callback_query.answer() лише гасить спінер
+    завантаження в Telegram-клієнті — не критична дія. Але якщо колбек
+    "протух" (>10 хв бездіяльності) або вже був оброблений раніше, answer()
+    кидає BadRequest("query is too old"/"query id is invalid"). У колбек-
+    хендлерах (on_callback, on_admin_callback, reg_*/limits_*/schedules_*)
+    цей виклик часто стоїть ПОСЕРЕД ланцюжка дій, і до нього вже могли
+    відбутись критичні зміни стану (take_lead, add_distributed_lead,
+    approve_manager, upsert_manager тощо) — якщо дати винятку тут пробитись
+    у зовнішній except, усе, що йде ПІСЛЯ answer(), просто не виконається,
+    хоча БД вже змінена. Тому тут помилка лише логується — виконання
+    продовжується.
+    """
+    try:
+        await query.answer(*args, **kwargs)
+    except BadRequest as e:
+        if 'query is too old' in str(e).lower() or 'query id is invalid' in str(e).lower():
+            logger.warning(f"safe_answer: callback протух — {e}")
+        else:
+            logger.error(f"safe_answer: {e}")
+    except Exception as e:
+        logger.error(f"safe_answer: {e}")
 
 
 async def send_long(message, text: str, parse_mode: str = 'HTML'):
