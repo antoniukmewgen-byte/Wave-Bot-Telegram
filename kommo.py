@@ -6,7 +6,10 @@ from typing import Optional
 import aiohttp
 from tenacity import retry, retry_if_exception_type, stop_after_attempt
 
-from config import AMO_SUBDOMAIN, AMO_TOKEN, AMO_PIPELINE_ID, AMO_HOT_STATUS_ID, HOT_STATUSES
+from config import (
+    AMO_SUBDOMAIN, AMO_TOKEN, AMO_PIPELINE_ID, AMO_HOT_STATUS_ID, HOT_STATUSES,
+    AMO_SOURCE_FIELD_ID, AMO_REACTIVATION_ENUM_ID,
+)
 from db import q, get_lead, get_manager
 from notifications import remove_from_others
 
@@ -86,7 +89,8 @@ async def get_lead_responsible(lead_id: str):
 
 async def get_lead_info(lead_id: str) -> Optional[dict]:
     """
-    Повертає {responsible_user_id, status_id, pipeline_id} заявки напряму з Kommo API.
+    Повертає {responsible_user_id, status_id, pipeline_id, custom_fields_values}
+    заявки напряму з Kommo API.
 
     Навмисно НЕ покладаємось на pipeline_id/status_id з тіла вебхука —
     для категорії 'responsible' Kommo може не присилати ці поля взагалі,
@@ -104,13 +108,31 @@ async def get_lead_info(lead_id: str) -> Optional[dict]:
                 return None
             data = await resp.json()
             return {
-                'responsible_user_id': data.get('responsible_user_id'),
-                'status_id':           data.get('status_id'),
-                'pipeline_id':         data.get('pipeline_id'),
+                'responsible_user_id':   data.get('responsible_user_id'),
+                'status_id':             data.get('status_id'),
+                'pipeline_id':           data.get('pipeline_id'),
+                'custom_fields_values':  data.get('custom_fields_values') or [],
             }
     except Exception as e:
         logger.error(f"get_lead_info: {e}")
         return None
+
+
+def is_lead_reactivation(info: dict) -> bool:
+    """
+    Перевіряє кастомне поле "Источник" (field_id=AMO_SOURCE_FIELD_ID) заявки —
+    True, якщо там обрано enum "Реактивация" (AMO_REACTIVATION_ENUM_ID).
+
+    Використовується щоб НЕ виводити менеджера з черги при переході заявки
+    в 'Распределены', якщо це не нове призначення, а реактивація старого ліда.
+    """
+    for field in info.get('custom_fields_values') or []:
+        if str(field.get('field_id')) != str(AMO_SOURCE_FIELD_ID):
+            continue
+        for value in field.get('values') or []:
+            if str(value.get('enum_id')) == str(AMO_REACTIVATION_ENUM_ID):
+                return True
+    return False
 
 
 async def set_kommo_responsible(lead_id: str, manager_id: str) -> bool:

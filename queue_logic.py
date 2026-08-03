@@ -807,9 +807,18 @@ async def on_lead_distributed(lead_id: str):
     вебхук-подію 'status' і на зміну responsible_user_id, без зміни стадії) —
     тому тут завжди перевіряємо ПОТОЧНОГО відповідального, а не тільки перший раз.
     """
-    from kommo import get_lead_responsible
+    from kommo import get_lead_info, is_lead_reactivation
 
-    responsible_kommo_id = await get_lead_responsible(lead_id)
+    info = await get_lead_info(lead_id)
+    if not info:
+        logger.warning(f"on_lead_distributed: не вдалось отримати дані заявки {lead_id}")
+        return
+
+    # Джерело "Реактивация" — рахуємо заявку і прив'язку до менеджера як завжди,
+    # але з черги менеджера НЕ виводимо (він продовжує отримувати нові заявки).
+    reactivation = is_lead_reactivation(info)
+
+    responsible_kommo_id = info.get('responsible_user_id')
     if not responsible_kommo_id:
         logger.warning(f"on_lead_distributed: не вдалось отримати responsible для заявки {lead_id}")
         return
@@ -826,7 +835,10 @@ async def on_lead_distributed(lead_id: str):
     if existing and existing['manager_id'] != new_manager_id:
         # Відповідального змінили, поки лід лишався в 'Распределены' —
         # звільняємо старого менеджера (і переносимо йому лічильник взятого)
-        await _release_reassigned_manager(lead_id, existing['manager_id'], new_manager_id)
+        await _release_reassigned_manager(
+            lead_id, existing['manager_id'], new_manager_id,
+            kept_in_queue=bool(existing.get('kept_in_queue')),
+        )
 
     if not mgr:
         logger.info(
@@ -842,7 +854,15 @@ async def on_lead_distributed(lead_id: str):
     manager_id = new_manager_id
     name       = mgr['sheet_name'] or mgr['tg_name'] or manager_id
 
-    await add_distributed_lead(lead_id, manager_id)
+    await add_distributed_lead(lead_id, manager_id, kept_in_queue=reactivation)
+
+    if reactivation:
+        logger.info(
+            f"on_lead_distributed: {name} ({manager_id}) — заявка {lead_id} "
+            f"джерело 'Реактивация', з черги НЕ виводимо"
+        )
+        return
+
     # Виводимо з черги тільки якщо менеджер зараз активний —
     # якщо він вже вийшов вручну або за розкладом, не перетираємо його причину виходу
     if await is_available(manager_id):
@@ -865,13 +885,16 @@ async def on_lead_distributed(lead_id: str):
         logger.warning(f"on_lead_distributed: не вдалось повідомити {manager_id}: {e}")
 
 
-async def _release_reassigned_manager(lead_id: str, old_manager_id: str, new_manager_id=None):
+async def _release_reassigned_manager(lead_id: str, old_manager_id: str, new_manager_id=None, kept_in_queue: bool = False):
     """
     Лід був закріплений за old_manager_id, але зараз в Kommo відповідальний
     інший (new_manager_id, або взагалі не наш менеджер — тоді None).
     Прибираємо стару прив'язку, переносимо лічильник «взятих» заявок і,
     якщо у старого менеджера більше немає інших розподілених лідів,
     повертаємо його в чергу (тільки якщо exit_reason саме 'has_distributed').
+
+    kept_in_queue=True — старого менеджера з черги й не виводили (джерело було
+    "Реактивация"), тому просто прибираємо прив'язку, без повернення в чергу/сповіщення.
     """
     await remove_distributed_lead(lead_id)
     await transfer_taken(old_manager_id, new_manager_id, day_key())
@@ -880,6 +903,13 @@ async def _release_reassigned_manager(lead_id: str, old_manager_id: str, new_man
     if remaining > 0:
         logger.info(
             f"on_lead_distributed (переприз.): {old_manager_id} ще має {remaining} заявок у 'Распределены'"
+        )
+        return
+
+    if kept_in_queue:
+        logger.info(
+            f"on_lead_distributed (переприз.): {old_manager_id} — заявку {lead_id} передано іншому, "
+            f"але з черги його й не виводили (реактивація) — нічого не змінюємо"
         )
         return
 
@@ -920,12 +950,22 @@ async def on_lead_undistributed(lead_id: str, manager_id: str):
     Викликається коли заявка покидає статус 'Распределены'.
     Якщо у менеджера більше немає таких заявок — повертає його в чергу.
     """
+    row = await get_distributed_lead(lead_id)
+    kept_in_queue = bool(row.get('kept_in_queue')) if row else False
+
     await remove_distributed_lead(lead_id)
 
     remaining = await count_distributed_leads(manager_id)
     if remaining > 0:
         logger.info(
             f"on_lead_undistributed: {manager_id} ще має {remaining} заявок у 'Распределены'"
+        )
+        return
+
+    if kept_in_queue:
+        logger.info(
+            f"on_lead_undistributed: заявка {lead_id} — реактивація, "
+            f"{manager_id} з черги й не виводили, нічого не змінюємо"
         )
         return
 

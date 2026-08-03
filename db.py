@@ -90,7 +90,8 @@ async def _create_tables():
         );
         CREATE TABLE IF NOT EXISTS distributed_leads (
             lead_id    TEXT PRIMARY KEY,
-            manager_id TEXT NOT NULL
+            manager_id TEXT NOT NULL,
+            kept_in_queue INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS status_chats (
             chat_id    TEXT PRIMARY KEY,
@@ -109,6 +110,7 @@ async def _migrate():
         "ALTER TABLE availability ADD COLUMN exit_reason TEXT",
         "ALTER TABLE schedules ADD COLUMN end_time TEXT NOT NULL DEFAULT '23:00'",
         "ALTER TABLE messages ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE distributed_leads ADD COLUMN kept_in_queue INTEGER NOT NULL DEFAULT 0",
     ]
     for sql in migrations:
         try:
@@ -441,10 +443,17 @@ async def delete_manager(tg_id: str):
 
 # ─── РОЗПОДІЛЕНІ ЗАЯВКИ ──────────────────────────────────────────────────────
 
-async def add_distributed_lead(lead_id: str, manager_id: str):
-    """Фіксує що заявка перейшла в 'Распределены' і прив'язана до менеджера."""
-    await q("INSERT OR REPLACE INTO distributed_leads (lead_id, manager_id) VALUES (?,?)",
-      (lead_id, manager_id))
+async def add_distributed_lead(lead_id: str, manager_id: str, kept_in_queue: bool = False):
+    """
+    Фіксує що заявка перейшла в 'Распределены' і прив'язана до менеджера.
+
+    kept_in_queue=True — особливий випадок (напр. джерело "Реактивация"):
+    заявку рахуємо як завжди, але менеджера з черги НЕ виводили, тому
+    on_lead_undistributed пізніше не повинен повертати його в чергу /
+    слати "вас повернуто в чергу" — він з неї й не виходив.
+    """
+    await q("INSERT OR REPLACE INTO distributed_leads (lead_id, manager_id, kept_in_queue) VALUES (?,?,?)",
+      (lead_id, manager_id, int(kept_in_queue)))
 
 
 async def remove_distributed_lead(lead_id: str):

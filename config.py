@@ -14,6 +14,8 @@ class _Settings(BaseSettings):
     amo_hot_status_id: str = '85731907'
     amo_distributed_status_id: str = '98056412'
     amo_distributed_pipeline_id: str = '12703972'
+    amo_source_field_id: str = '1220023'
+    amo_reactivation_enum_id: str = '1028911'
 
     webhook_path: str = 'movenation'
     webhook_secret: str = ''
@@ -48,6 +50,11 @@ AMO_PIPELINE_ID              = _settings.amo_pipeline_id
 AMO_HOT_STATUS_ID            = _settings.amo_hot_status_id
 AMO_DISTRIBUTED_STATUS_ID    = _settings.amo_distributed_status_id
 AMO_DISTRIBUTED_PIPELINE_ID  = _settings.amo_distributed_pipeline_id
+# Кастомне поле "Источник" та enum-значення "Реактивация" — якщо заявка потрапила
+# в 'Распределены', але це реактивація (а не нове призначення), менеджера з черги
+# не виводимо (див. queue_logic.on_lead_distributed).
+AMO_SOURCE_FIELD_ID          = _settings.amo_source_field_id
+AMO_REACTIVATION_ENUM_ID     = _settings.amo_reactivation_enum_id
 WEBHOOK_PATH   = _settings.webhook_path
 # Спільний секрет для перевірки вхідних вебхуків Kommo (?secret=... в URL).
 # Без нього /webhook/{WEBHOOK_PATH} приймає запити від БУДЬ-КОГО, хто дізнається шлях —
