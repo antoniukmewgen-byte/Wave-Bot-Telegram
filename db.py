@@ -438,7 +438,24 @@ async def approve_manager(tg_id: str):
 
 
 async def delete_manager(tg_id: str):
+    """
+    Видаляє менеджера і весь пов'язаний РАНТАЙМ-стан (не історію).
+
+    Раніше чистилась тільки таблиця managers, а schedules/availability/connected
+    лишались "сирітськими" записами назавжди. Найгірший наслідок — schedules:
+    _check_schedules() в queue_logic.py читає ЦІЛУ таблицю schedules напряму
+    (SELECT * FROM schedules, без JOIN на managers) і щодня на початку зміни
+    намагається надіслати нагадування навіть видаленому/заблокованому менеджеру.
+    Той знову кидає Forbidden → знову _deactivate_blocked() → знову сповіщення
+    адмінам "заблокував бота" — щодня, нескінченно, для вже видаленого юзера.
+
+    leads/messages/stats/skipped/distributed_leads навмисно НЕ чіпаємо —
+    це історія (статистика, лог заявок), вона має лишитись.
+    """
     await q("DELETE FROM managers WHERE tg_id=?", (tg_id,))
+    await q("DELETE FROM schedules WHERE manager_id=?", (tg_id,))
+    await q("DELETE FROM availability WHERE manager_id=?", (tg_id,))
+    await q("DELETE FROM connected WHERE manager_id=?", (tg_id,))
 
 
 # ─── РОЗПОДІЛЕНІ ЗАЯВКИ ──────────────────────────────────────────────────────
