@@ -258,6 +258,31 @@ async def fetch_managers() -> Dict[str, dict]:
     return _cache
 
 
+async def get_all_sheet_names() -> list:
+    """
+    Повертає всі унікальні непорожні імена з колонки A таблиці (COL_MANAGER),
+    незалежно від періоду (рік/місяць) чи заповненого плану обігу.
+
+    На відміну від fetch_managers() — яка навмисно фільтрує тільки тих, хто вже
+    відповідає умовам черги ПОТОЧНОГО місяця (є план, конверсія/оплати в нормі) —
+    тут беремо просто "чи є таке ім'я в таблиці взагалі". Потрібно для реєстрації:
+    людина ще не в системі бота, тож вимагати від неї вже мати виставлений план
+    за поточний місяць, щоб просто зареєструватись — нелогічне обмеження, яке
+    раніше могло показувати "немає вільних імен" навіть коли ім'я в таблиці є.
+    """
+    try:
+        rows = await _read_rows()
+    except Exception as e:
+        logger.error(f"get_all_sheet_names: {e}")
+        return []
+    names = {
+        row[COL_MANAGER].strip()
+        for row in rows[1:]
+        if len(row) > COL_MANAGER and row[COL_MANAGER].strip()
+    }
+    return sorted(names)
+
+
 # Історичний псевдонім: раніше fetch_managers() була синхронною і викликалась
 # через asyncio.to_thread(), а fetch_managers_async() — обгорткою над нею.
 # Тепер fetch_managers() сама по собі async (gspread_asyncio), тож псевдонім

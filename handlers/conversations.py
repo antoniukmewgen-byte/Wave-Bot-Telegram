@@ -11,7 +11,7 @@ from db import (
     get_managers_dict, upsert_manager, get_manager, get_all_managers,
 )
 from notifications import safe_answer
-from sheets import fetch_managers_async
+from sheets import fetch_managers_async, get_all_sheet_names
 
 logger = logging.getLogger(__name__)
 
@@ -301,16 +301,20 @@ async def reg_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return ConversationHandler.END
 
-    # Список імен з Google Sheets (тільки ті, кого немає в БД)
+    # Список імен з Google Sheets (тільки ті, кого немає в БД).
+    # Навмисно НЕ через fetch_managers_async() — та фільтрує тільки менеджерів,
+    # що вже проходять умови черги поточного місяця (план/конверсія/оплати),
+    # через що ім'я могло вважатись "зайнятим", хоча воно просто в таблиці
+    # ще не набрало умов черги. Для реєстрації достатньо факту "ім'я є в таблиці".
     try:
-        sheet_data = await fetch_managers_async()
+        all_sheet_names = await get_all_sheet_names()
         registered_sheet_names = {
             r['sheet_name'] for r in await get_all_managers(approved_only=False)
             if r['sheet_name']
         }
         available_names = [
-            info['name'] for tg, info in sheet_data.items()
-            if info['name'] not in registered_sheet_names
+            name for name in all_sheet_names
+            if name not in registered_sheet_names
         ]
     except Exception as e:
         logger.error(f"reg_start: не вдалось отримати список з Sheets: {e}")
