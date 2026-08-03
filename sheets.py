@@ -84,7 +84,7 @@ _lock = asyncio.Lock()
 _EXPECTED_HEADER_KEYWORDS = {
     COL_PLAN:       ('план', 'обіг'),
     COL_HOT_TAKEN:  ('гарячих', 'лідів'),
-    COL_PAYMENTS:   ('проданих', 'консультацій'),
+    COL_PAYMENTS:   ('проданих', 'конс'),
     COL_CONVERSION: ('конверсія',),
 }
 _header_warned: set = set()
