@@ -1164,10 +1164,18 @@ async def _is_lead_still_distributed(lead_id: str, tracked_manager_id: str) -> b
     if pipeline_id == AMO_DISTRIBUTED_PIPELINE_ID and status_id == AMO_DISTRIBUTED_STATUS_ID:
         return True
 
-    if pipeline_id == AMO_PIPELINE_ID:
-        # Могли повернути заявку в гарячу воронку з тим самим відповідальним —
-        # це наше власне відлуння (PATCH від "Беру в роботу"), а не реальна
-        # передача. Звільняємо тільки якщо відповідальний справді змінився.
+    if pipeline_id == AMO_PIPELINE_ID and status_id == AMO_HOT_STATUS_ID:
+        # Могли повернути заявку в гарячу воронку, у ТОЙ САМИЙ статус
+        # "Кваліфікація" — це наше власне відлуння (PATCH від "Беру в
+        # роботу"), а не реальна передача. Звільняємо тільки якщо
+        # відповідальний справді змінився.
+        #
+        # ВАЖЛИВО: перевіряти тут pipeline_id БЕЗ status_id — баг: системні
+        # статуси "Закрито успішно"/"Закрито і не реалізовано" (142/143)
+        # теж лежать у цій самій воронці (AMO_PIPELINE_ID). Якщо менеджер
+        # закрив заявку як нереалізовану, відповідальний у Kommo зазвичай
+        # НЕ змінюється — без перевірки status_id таке закриття помилково
+        # розпізнавалось як "актуальна, у роботі", і менеджера не звільняли.
         tracked_mgr      = await get_manager(tracked_manager_id)
         tracked_kommo_id = tracked_mgr['kommo_id'] if tracked_mgr else None
         return info.get('responsible_user_id') == tracked_kommo_id
