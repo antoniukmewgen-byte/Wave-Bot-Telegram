@@ -14,7 +14,7 @@ from telegram.error import Forbidden
 
 from config import (
     TIMEOUT_PERSONAL, TIMEOUT_WARN, TIMEOUT_SOS, TIMEOUT_REBROADCAST, SCHEDULER_TICK,
-    AMO_PIPELINE_ID, AMO_DISTRIBUTED_PIPELINE_ID, AMO_DISTRIBUTED_STATUS_ID,
+    AMO_PIPELINE_ID, AMO_HOT_STATUS_ID, AMO_DISTRIBUTED_PIPELINE_ID, AMO_DISTRIBUTED_STATUS_ID,
 )
 from db import (
     q, get_lead, get_all_taken, get_all_availability, get_all_max_leads_overrides,
