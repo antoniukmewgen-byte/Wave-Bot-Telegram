@@ -135,6 +135,81 @@ def is_lead_reactivation(info: dict) -> bool:
     return False
 
 
+AMO_PHONE_FIELD_ID = '458590'  # кастомне поле "Телефон" — і в контакта, і в компанії
+
+
+def _extract_phone_field(custom_fields_values: list) -> Optional[str]:
+    """Шукає значення поля field_id==AMO_PHONE_FIELD_ID серед custom_fields_values сутності."""
+    for field in custom_fields_values or []:
+        if str(field.get('field_id')) != AMO_PHONE_FIELD_ID:
+            continue
+        for value in field.get('values') or []:
+            phone = value.get('value')
+            if phone:
+                return str(phone)
+    return None
+
+
+async def _get_entity_phone(entity: str, entity_id) -> Optional[str]:
+    """GET /api/v4/{entity}/{id} і витягує телефон з custom_fields_values."""
+    url     = f"https://{AMO_SUBDOMAIN}.kommo.com/api/v4/{entity}/{entity_id}"
+    headers = {"Authorization": f"Bearer {AMO_TOKEN}"}
+    try:
+        session = await _get_session()
+        async with session.get(url, headers=headers) as resp:
+            if resp.status != 200:
+                logger.error(f"_get_entity_phone: HTTP {resp.status} для {entity}/{entity_id}")
+                return None
+            data = await resp.json()
+            return _extract_phone_field(data.get('custom_fields_values') or [])
+    except Exception as e:
+        logger.error(f"_get_entity_phone: {entity}/{entity_id} | {e}")
+        return None
+
+
+async def get_lead_phone(lead_id: str) -> Optional[str]:
+    """
+    Повертає телефон клієнта заявки: спочатку шукає в прив'язаному контакті
+    (custom field 458590), якщо там порожньо — фолбек на прив'язану компанію
+    (те саме поле). Потрібно для визначення часового поясу клієнта
+    (див. phone_timezone.py) — "ранкові" ліди не видаються менеджеру до 9:00
+    за місцевим часом клієнта.
+    """
+    if not AMO_TOKEN:
+        return None
+    url     = f"https://{AMO_SUBDOMAIN}.kommo.com/api/v4/leads/{lead_id}"
+    headers = {"Authorization": f"Bearer {AMO_TOKEN}"}
+    params  = {"with": "contacts,company"}
+    try:
+        session = await _get_session()
+        async with session.get(url, headers=headers, params=params) as resp:
+            if resp.status != 200:
+                logger.error(f"get_lead_phone: HTTP {resp.status} для заявки {lead_id}")
+                return None
+            data = await resp.json()
+    except Exception as e:
+        logger.error(f"get_lead_phone: {e}")
+        return None
+
+    embedded = data.get('_embedded') or {}
+
+    for contact in embedded.get('contacts') or []:
+        contact_id = contact.get('id')
+        if not contact_id:
+            continue
+        phone = await _get_entity_phone('contacts', contact_id)
+        if phone:
+            return phone
+
+    company = embedded.get('company')
+    if company and company.get('id'):
+        phone = await _get_entity_phone('companies', company['id'])
+        if phone:
+            return phone
+
+    return None
+
+
 async def set_kommo_responsible(lead_id: str, manager_id: str) -> bool:
     """Встановлює відповідального менеджера в Kommo. Повертає True якщо успішно."""
     mgr = await get_manager(manager_id)

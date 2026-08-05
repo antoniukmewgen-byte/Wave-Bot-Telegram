@@ -21,7 +21,9 @@ from db import (
     get_all_managers, get_manager, get_exit_reason,
     add_distributed_lead, remove_distributed_lead, count_distributed_leads, get_distributed_lead,
     transfer_taken, get_connected, get_managers_dict, get_all_exit_reasons, get_status_chats,
+    get_all_held_leads, remove_held_lead,
 )
+from phone_timezone import is_client_morning
 from notifications import (
     notify_admins, notify_admin_error, send_to, edit_msg, delete_and_send, remove_from_others,
     cleanup_stale_messages, remove_buttons_for_manager, delete_messages_for_manager,
@@ -737,6 +739,32 @@ async def _check_status_broadcast():
         await broadcast_manager_status()
 
 
+async def _release_held_leads():
+    """
+    Щохвилини перевіряє заявки, "заморожені" в held_leads (клієнту ще не
+    настало 9:00 за його місцевим часом на момент приходу вебхука — див.
+    webhook.py). Як тільки в клієнта настає 9:00 — заявка переводиться в
+    звичайну чергу leads і одразу пропонується менеджерам.
+    """
+    held = await get_all_held_leads()
+    for row in held:
+        if not is_client_morning(row['timezone']):
+            continue
+        lead_id = row['lead_id']
+        try:
+            await q(
+                "INSERT OR IGNORE INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
+                (lead_id, 'queued', datetime.now().timestamp(), row['title']),
+            )
+        except Exception as e:
+            logger.error(f"_release_held_leads: не вдалось записати заявку {lead_id}: {e}")
+            await notify_admin_error(f"_release_held_leads (запис заявки #{lead_id})", e)
+            continue
+        await remove_held_lead(lead_id)
+        logger.info(f"_release_held_leads: заявка {lead_id} — у клієнта настало 9:00 ({row['timezone']}), видаємо")
+        asyncio.create_task(assign_next(lead_id))
+
+
 def _scheduler_job(name: str, fn):
     """Обгортає job-функцію try/except-ом, що логує і повідомляє адмінів —
     той самий except Exception, що раніше був спільним для всього scheduler_loop()."""
@@ -752,6 +780,7 @@ def _scheduler_job(name: str, fn):
 async def _run_minute_checks():
     await _check_schedules()
     await _check_status_broadcast()
+    await _release_held_leads()
 
 
 async def _run_daily_reset():

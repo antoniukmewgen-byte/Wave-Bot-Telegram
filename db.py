@@ -97,6 +97,13 @@ async def _create_tables():
             chat_id    TEXT PRIMARY KEY,
             added_at   REAL
         );
+        CREATE TABLE IF NOT EXISTS held_leads (
+            lead_id    TEXT PRIMARY KEY,
+            title      TEXT,
+            phone      TEXT,
+            timezone   TEXT NOT NULL,
+            created_at REAL NOT NULL
+        );
     """)
     await _conn.commit()
 
@@ -496,6 +503,32 @@ async def get_manager_distributed_leads(manager_id: str) -> list[str]:
     rows = await q("SELECT lead_id FROM distributed_leads WHERE manager_id=?",
                    (manager_id,), fetch='all')
     return [r['lead_id'] for r in (rows or [])]
+
+
+# ─── ЗАЯВКИ НА УТРИМАННІ (до 9:00 за часом клієнта) ─────────────────────────
+
+async def add_held_lead(lead_id: str, title: str, phone: Optional[str], timezone: str):
+    """
+    Фіксує заявку, яку Kommo вже прислав, але клієнту в його часовому поясі
+    ще не настало 9:00 — тому менеджеру її поки не показуємо (див. webhook.py).
+    """
+    await q("""INSERT OR REPLACE INTO held_leads (lead_id, title, phone, timezone, created_at)
+         VALUES (?,?,?,?,?)""",
+      (lead_id, title, phone, timezone, datetime.now().timestamp()))
+
+
+async def get_held_lead(lead_id: str) -> Optional[dict]:
+    row = await q("SELECT * FROM held_leads WHERE lead_id=?", (lead_id,), fetch='one')
+    return dict(row) if row else None
+
+
+async def remove_held_lead(lead_id: str):
+    await q("DELETE FROM held_leads WHERE lead_id=?", (lead_id,))
+
+
+async def get_all_held_leads() -> list[dict]:
+    rows = await q("SELECT * FROM held_leads", fetch='all')
+    return [dict(r) for r in rows] if rows else []
 
 
 async def migrate_managers_from_config(managers_dict: dict, kommo_ids_dict: dict):

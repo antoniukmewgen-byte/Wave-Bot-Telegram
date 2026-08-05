@@ -11,9 +11,10 @@ from config import (
     AMO_PIPELINE_ID, AMO_HOT_STATUS_ID,
     AMO_DISTRIBUTED_STATUS_ID, AMO_DISTRIBUTED_PIPELINE_ID,
 )
-from db import q, get_lead, get_distributed_lead
-from kommo import make_lead_title, get_lead_info
+from db import q, get_lead, get_distributed_lead, add_held_lead
+from kommo import make_lead_title, get_lead_info, get_lead_phone
 from notifications import notify_admin_error, remove_from_others, schedule_cleanup
+from phone_timezone import resolve_client_timezone, is_client_morning
 from queue_logic import assign_next, on_lead_distributed, on_lead_undistributed
 
 logger = logging.getLogger(__name__)
@@ -246,6 +247,30 @@ async def _handle_lead_event(event: dict):
         return
 
     title = make_lead_title(status_id, lead_id)
+
+    # ── "Ранкові" ліди: не видаємо менеджеру, поки клієнту не настало 9:00 ──
+    # за його місцевим часом (визначається за телефоном контакта/компанії).
+    # Реальний часовий пояс рахуємо лише для UA/US номерів, для решти —
+    # примусово America/New_York (див. phone_timezone.py).
+    try:
+        phone = await get_lead_phone(lead_id)
+    except Exception as e:
+        logger.error(f"Webhook: не вдалось отримати телефон заявки {lead_id}: {e}")
+        phone = None
+
+    tz_name = resolve_client_timezone(phone)
+
+    if not is_client_morning(tz_name):
+        try:
+            await add_held_lead(lead_id, title, phone, tz_name)
+            logger.info(
+                f"Webhook: заявка {lead_id} — у клієнта ще не 9:00 ({tz_name}), "
+                f"тримаємо в held_leads"
+            )
+        except Exception as e:
+            logger.error(f"Webhook: не вдалось записати заявку {lead_id} в held_leads: {e}")
+            await notify_admin_error(f"webhook (held_leads запис заявки #{lead_id})", e)
+        return
 
     # Retry INSERT up to 3 times — a transient DB lock must not silently drop a lead
     try:
