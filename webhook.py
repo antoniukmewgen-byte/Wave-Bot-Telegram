@@ -12,7 +12,7 @@ from config import (
     AMO_DISTRIBUTED_STATUS_ID, AMO_DISTRIBUTED_PIPELINE_ID,
 )
 from db import q, get_lead, get_distributed_lead, add_held_lead
-from kommo import make_lead_title, get_lead_info, get_lead_phone
+from kommo import make_lead_title, get_lead_info, get_lead_phone, is_lead_reactivation
 from notifications import notify_admin_error, remove_from_others, schedule_cleanup
 from phone_timezone import resolve_client_timezone, is_client_morning
 from queue_logic import assign_next, on_lead_distributed, on_lead_undistributed
@@ -252,25 +252,33 @@ async def _handle_lead_event(event: dict):
     # за його місцевим часом (визначається за телефоном контакта/компанії).
     # Реальний часовий пояс рахуємо лише для UA/US номерів, для решти —
     # примусово America/New_York (див. phone_timezone.py).
-    try:
-        phone = await get_lead_phone(lead_id)
-    except Exception as e:
-        logger.error(f"Webhook: не вдалось отримати телефон заявки {lead_id}: {e}")
-        phone = None
-
-    tz_name = resolve_client_timezone(phone)
-
-    if not is_client_morning(tz_name):
+    #
+    # Виняток: джерело "Реактивация" (custom-поле "Источник") — це не нове
+    # звернення клієнта, а стара угода, яку повернули в роботу. Її НЕ тримаємо
+    # до ранку — заявка йде одразу в чергу, як і до появи цієї фічі.
+    info = await get_lead_info(lead_id)
+    if info and is_lead_reactivation(info):
+        logger.info(f"Webhook: заявка {lead_id} — джерело 'Реактивация', ранкову перевірку пропускаємо")
+    else:
         try:
-            await add_held_lead(lead_id, title, phone, tz_name)
-            logger.info(
-                f"Webhook: заявка {lead_id} — у клієнта ще не 9:00 ({tz_name}), "
-                f"тримаємо в held_leads"
-            )
+            phone = await get_lead_phone(lead_id)
         except Exception as e:
-            logger.error(f"Webhook: не вдалось записати заявку {lead_id} в held_leads: {e}")
-            await notify_admin_error(f"webhook (held_leads запис заявки #{lead_id})", e)
-        return
+            logger.error(f"Webhook: не вдалось отримати телефон заявки {lead_id}: {e}")
+            phone = None
+
+        tz_name = resolve_client_timezone(phone)
+
+        if not is_client_morning(tz_name):
+            try:
+                await add_held_lead(lead_id, title, phone, tz_name)
+                logger.info(
+                    f"Webhook: заявка {lead_id} — у клієнта ще не 9:00 ({tz_name}), "
+                    f"тримаємо в held_leads"
+                )
+            except Exception as e:
+                logger.error(f"Webhook: не вдалось записати заявку {lead_id} в held_leads: {e}")
+                await notify_admin_error(f"webhook (held_leads запис заявки #{lead_id})", e)
+            return
 
     # Retry INSERT up to 3 times — a transient DB lock must not silently drop a lead
     try:

@@ -772,7 +772,7 @@ async def resweep_active_leads_for_client_time() -> dict:
     у held_leads. Звідти її поверне назад в чергу _release_held_leads(),
     щойно в клієнта настане 9:00 — так само, як і звичайні "ранкові" ліди.
     """
-    from kommo import get_lead_phone
+    from kommo import get_lead_phone, get_lead_info, is_lead_reactivation
 
     rows = await q(
         "SELECT lead_id, title FROM leads WHERE status NOT IN ('taken','duplicate','closed')",
@@ -784,6 +784,17 @@ async def resweep_active_leads_for_client_time() -> dict:
     for row in (rows or []):
         lead_id = row['lead_id']
         title   = row['title']
+
+        # Джерело "Реактивация" — стара угода, повернута в роботу, ранкову
+        # перевірку для неї не робимо (так само як для нових лідів у webhook.py).
+        try:
+            info = await get_lead_info(lead_id)
+        except Exception as e:
+            logger.error(f"resweep_active_leads_for_client_time: get_lead_info {lead_id}: {e}")
+            info = None
+        if info and is_lead_reactivation(info):
+            continue
+
         try:
             phone = await get_lead_phone(lead_id)
         except Exception as e:
