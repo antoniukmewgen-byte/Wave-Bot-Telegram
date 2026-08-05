@@ -16,7 +16,14 @@ from notifications import remove_from_others
 logger = logging.getLogger(__name__)
 
 _session: Optional[aiohttp.ClientSession] = None
-_session_lock = asyncio.Lock()
+# Лінива ініціалізація і самого Lock-а (а не тільки _session!): якщо створити
+# asyncio.Lock() одразу на рівні модуля, він прив'яжеться до event loop, що
+# є "поточним" у момент import (ще до uvicorn.run()) — а це часто ІНШИЙ loop,
+# ніж той, у якому реально виконується код під uvicorn. Наслідок — саме така
+# помилка й спостерігалась у проді: "got Future <Future pending> attached to
+# a different loop". Створюючи Lock лінивo, всередині вже запущеної корутини,
+# гарантуємо, що він прив'яжеться до правильного (реально робочого) loop.
+_session_lock: Optional[asyncio.Lock] = None
 
 
 async def _get_session() -> aiohttp.ClientSession:
@@ -27,8 +34,10 @@ async def _get_session() -> aiohttp.ClientSession:
     потреби. TCPConnector(limit=20) додатково обмежує паралелізм як
     захист-в-глибину, навіть якщо вище по стеку тротлінг колись знову проламається.
     """
-    global _session
+    global _session, _session_lock
     if _session is None or _session.closed:
+        if _session_lock is None:
+            _session_lock = asyncio.Lock()
         async with _session_lock:
             if _session is None or _session.closed:
                 _session = aiohttp.ClientSession(
@@ -87,6 +96,78 @@ async def get_lead_responsible(lead_id: str):
     return info.get('responsible_user_id') if info else None
 
 
+class _KommoRateLimited(Exception):
+    def __init__(self, retry_after: int):
+        self.retry_after = retry_after
+
+
+class _KommoServerError(Exception):
+    def __init__(self, status: int):
+        self.status = status
+
+
+class _KommoFatalError(Exception):
+    """Неретраюча помилка — синхронізацію (чи запит) треба зупинити негайно, без повторів."""
+    def __init__(self, status: int):
+        self.status = status
+
+
+def _kommo_retry_wait(retry_state) -> float:
+    exc = retry_state.outcome.exception()
+    if isinstance(exc, _KommoRateLimited):
+        return exc.retry_after
+    return 2 ** (retry_state.attempt_number - 1)
+
+
+def _kommo_before_sleep(retry_state):
+    exc     = retry_state.outcome.exception()
+    attempt = retry_state.attempt_number
+    if isinstance(exc, _KommoRateLimited):
+        logger.warning(f"Kommo sync: rate limit — чекаємо {exc.retry_after}с (спроба {attempt}/3)")
+    else:
+        logger.error(f"Kommo sync: server error HTTP {exc.status} (спроба {attempt}/3)")
+
+
+def _kommo_lead_before_sleep(retry_state) -> None:
+    exc     = retry_state.outcome.exception()
+    attempt = retry_state.attempt_number
+    lead_id = retry_state.args[0] if retry_state.args else '?'
+    if isinstance(exc, _KommoRateLimited):
+        logger.warning(
+            f"get_lead_info: rate limit для заявки {lead_id} — "
+            f"чекаємо {exc.retry_after}с (спроба {attempt}/3)"
+        )
+    else:
+        logger.error(f"get_lead_info: server error HTTP {exc.status} для заявки {lead_id} (спроба {attempt}/3)")
+
+
+@retry(
+    retry=retry_if_exception_type((_KommoRateLimited, _KommoServerError)),
+    wait=_kommo_retry_wait,
+    stop=stop_after_attempt(3),
+    before_sleep=_kommo_lead_before_sleep,
+    reraise=True,
+)
+async def _fetch_lead_info(lead_id: str) -> dict:
+    url     = f"https://{AMO_SUBDOMAIN}.kommo.com/api/v4/leads/{lead_id}"
+    headers = {"Authorization": f"Bearer {AMO_TOKEN}"}
+    session = await _get_session()
+    async with session.get(url, headers=headers) as resp:
+        if resp.status == 429:
+            raise _KommoRateLimited(int(resp.headers.get('Retry-After', 5)))
+        if resp.status >= 500:
+            raise _KommoServerError(resp.status)
+        if resp.status != 200:
+            raise _KommoFatalError(resp.status)
+        data = await resp.json()
+        return {
+            'responsible_user_id':   data.get('responsible_user_id'),
+            'status_id':             data.get('status_id'),
+            'pipeline_id':           data.get('pipeline_id'),
+            'custom_fields_values':  data.get('custom_fields_values') or [],
+        }
+
+
 async def get_lead_info(lead_id: str) -> Optional[dict]:
     """
     Повертає {responsible_user_id, status_id, pipeline_id, custom_fields_values}
@@ -95,24 +176,22 @@ async def get_lead_info(lead_id: str) -> Optional[dict]:
     Навмисно НЕ покладаємось на pipeline_id/status_id з тіла вебхука —
     для категорії 'responsible' Kommo може не присилати ці поля взагалі,
     через що перевірка "лід досі в 'Распределены'" мовчки провалювалась би.
+
+    При 429 (rate limit) чи 5xx — до 3 спроб з бекофом (той самий механізм,
+    що й у sync_from_kommo/_fetch_leads_page), бо раніше поодинокий 429 під
+    час сплеску вебхуків призводив до того, що заявка мовчки не оброблялась
+    (див. прод-лог: 4 такі помилки поспіль за ~20с під час сплеску 30.07).
     """
     if not AMO_TOKEN:
         return None
-    url     = f"https://{AMO_SUBDOMAIN}.kommo.com/api/v4/leads/{lead_id}"
-    headers = {"Authorization": f"Bearer {AMO_TOKEN}"}
     try:
-        session = await _get_session()
-        async with session.get(url, headers=headers) as resp:
-            if resp.status != 200:
-                logger.error(f"get_lead_info: HTTP {resp.status} для заявки {lead_id}")
-                return None
-            data = await resp.json()
-            return {
-                'responsible_user_id':   data.get('responsible_user_id'),
-                'status_id':             data.get('status_id'),
-                'pipeline_id':           data.get('pipeline_id'),
-                'custom_fields_values':  data.get('custom_fields_values') or [],
-            }
+        return await _fetch_lead_info(lead_id)
+    except _KommoFatalError as e:
+        logger.error(f"get_lead_info: HTTP {e.status} для заявки {lead_id}")
+        return None
+    except (_KommoRateLimited, _KommoServerError) as e:
+        logger.error(f"get_lead_info: заявка {lead_id} не отримана після 3 спроб ({e})")
+        return None
     except Exception as e:
         logger.error(f"get_lead_info: {e}")
         return None
@@ -231,38 +310,6 @@ async def set_kommo_responsible(lead_id: str, manager_id: str) -> bool:
     except Exception as e:
         logger.error(f"Kommo responsible: помилка для заявки {lead_id} | {e}")
         return False
-
-
-class _KommoRateLimited(Exception):
-    def __init__(self, retry_after: int):
-        self.retry_after = retry_after
-
-
-class _KommoServerError(Exception):
-    def __init__(self, status: int):
-        self.status = status
-
-
-class _KommoFatalError(Exception):
-    """Неретраюча помилка — синхронізацію треба зупинити негайно, без повторів."""
-    def __init__(self, status: int):
-        self.status = status
-
-
-def _kommo_retry_wait(retry_state) -> float:
-    exc = retry_state.outcome.exception()
-    if isinstance(exc, _KommoRateLimited):
-        return exc.retry_after
-    return 2 ** (retry_state.attempt_number - 1)
-
-
-def _kommo_before_sleep(retry_state):
-    exc     = retry_state.outcome.exception()
-    attempt = retry_state.attempt_number
-    if isinstance(exc, _KommoRateLimited):
-        logger.warning(f"Kommo sync: rate limit — чекаємо {exc.retry_after}с (спроба {attempt}/3)")
-    else:
-        logger.error(f"Kommo sync: server error HTTP {exc.status} (спроба {attempt}/3)")
 
 
 @retry(

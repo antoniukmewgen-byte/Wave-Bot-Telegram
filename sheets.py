@@ -31,7 +31,10 @@ MONTHS_UA = {
 # тільки для перепідключення worksheet, якщо саме він став невалідним.
 _agcm: Optional[gspread_asyncio.AsyncioGspreadClientManager] = None
 _ws: Optional[gspread_asyncio.AsyncioGspreadWorksheet] = None
-_ws_lock = asyncio.Lock()
+# Лінива ініціалізація (див. аналогічний коментар/фікс у kommo.py
+# _session_lock) — уникаємо прив'язки Lock-а до "чужого" event loop, що
+# існував на момент import модуля, а не того, в якому реально працює uvicorn.
+_ws_lock: Optional[asyncio.Lock] = None
 
 
 _SCOPES = [
@@ -53,8 +56,10 @@ def _get_agcm() -> gspread_asyncio.AsyncioGspreadClientManager:
 
 async def _get_ws() -> gspread_asyncio.AsyncioGspreadWorksheet:
     """Повертає worksheet, перепідключається якщо сесія протухла."""
-    global _ws
+    global _ws, _ws_lock
     if _ws is None:
+        if _ws_lock is None:
+            _ws_lock = asyncio.Lock()
         async with _ws_lock:
             if _ws is None:
                 agc = await _get_agcm().authorize()
@@ -75,7 +80,8 @@ async def _reconnect() -> gspread_asyncio.AsyncioGspreadWorksheet:
 _cache: Dict[str, dict] = {}
 _cache_ts: float = 0.0
 _rows_cache: list = []
-_lock = asyncio.Lock()
+# Лінива ініціалізація — той самий фікс, що й вище для _ws_lock/_session_lock.
+_lock: Optional[asyncio.Lock] = None
 
 # Ключові слова, які очікуємо побачити в заголовку кожної колонки (нижній регістр).
 # Джерело — коментарі біля COL_* у config.py. Використовується лише для
@@ -174,7 +180,7 @@ async def fetch_managers() -> Dict[str, dict]:
     Повертає {telegram_id: {name, conversion, payments, hot_taken, max_leads}}
     Кеш оновлюється раз на SHEETS_REFRESH секунд.
     """
-    global _cache, _cache_ts
+    global _cache, _cache_ts, _lock
 
     now = datetime.now().timestamp()
     # Читаємо у локальні змінні — захист від зміни глобалів між перевіркою і поверненням
@@ -183,6 +189,8 @@ async def fetch_managers() -> Dict[str, dict]:
     if now - cache_ts < SHEETS_REFRESH and cache:
         return cache
 
+    if _lock is None:
+        _lock = asyncio.Lock()
     async with _lock:
         # Повторна перевірка після отримання lock (інший таск міг вже оновити кеш)
         now2 = datetime.now().timestamp()

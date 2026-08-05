@@ -35,8 +35,17 @@ import state
 
 logger = logging.getLogger(__name__)
 
-# Захист від паралельного запуску _tick
-_tick_lock = asyncio.Lock()
+# Захист від паралельного запуску _tick.
+# Навмисно НЕ asyncio.Lock(): Lock створювався б на рівні модуля (в момент
+# import, ще до uvicorn.run()) і прив'язувався б до "поточного" на той момент
+# event loop, що на Python 3.9 часто виявляється ІНШИМ loop, ніж той, у якому
+# реально виконується lifespan()/_tick() під uvicorn. Це й спричиняло
+# "got Future <Future pending> attached to a different loop" у проді
+# (11 разів за 7 днів — саме на job 'tick'). Тут же потрібен лише простий
+# прапорець "тік вже виконується" в межах ОДНОГО loop, без реальної
+# міжкорутинної конкуренції за ресурс — bool повністю покриває цей випадок
+# і не залежить від того, який event loop був активний на момент імпорту.
+_tick_running = False
 
 
 def day_key() -> str:
@@ -521,12 +530,15 @@ async def _send_next_queued_broadcast(**tick_ctx):
 
 
 async def _tick():
+    global _tick_running
+
     # Якщо попередній тік ще виконується — пропускаємо, не накопичуємо
-    if _tick_lock.locked():
+    if _tick_running:
         logger.warning("_tick: попередній тік ще виконується, пропускаємо")
         return
 
-    async with _tick_lock:
+    _tick_running = True
+    try:
         now   = datetime.now().timestamp()
         leads = await q(
             "SELECT * FROM leads WHERE status NOT IN ('taken','duplicate','closed') ORDER BY created_at DESC",
@@ -582,6 +594,8 @@ async def _tick():
                     await rebroadcast_periodic(lid, lead['title'], **tick_ctx)
 
         await _send_next_queued_broadcast(**tick_ctx)
+    finally:
+        _tick_running = False
 
 
 async def _send_shift_reminder(manager_id: str, name: str):
