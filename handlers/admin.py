@@ -15,7 +15,10 @@ from db import (
 )
 from kommo import sync_from_kommo
 from notifications import send_long, notify_admin_error
-from queue_logic import day_key, _build_sent_map, cleanup_orphaned_manager_messages, build_manager_status_text
+from queue_logic import (
+    day_key, _build_sent_map, cleanup_orphaned_manager_messages, build_manager_status_text,
+    reconcile_distributed_leads,
+)
 from sheets import fetch_managers_async
 
 logger = logging.getLogger(__name__)
@@ -28,6 +31,7 @@ ADMIN_KB = ReplyKeyboardMarkup(
         [KeyboardButton("🔄 Синхронізація"),     KeyboardButton("🔌 Підключення")],
         [KeyboardButton("⏰ Розклади"),           KeyboardButton("🔍 Діагностика")],
         [KeyboardButton("👤 Менеджери"),          KeyboardButton("🧹 Прибрати привиди")],
+        [KeyboardButton("📡 Перевірити на зв'язку")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -390,6 +394,40 @@ async def _handle_cleanup_orphans(message):
         logger.error(f"Cleanup orphans error: {e}")
 
 
+async def _handle_check_distributed(message):
+    """
+    Ручна звірка менеджерів, заблокованих статусом "на зв'язку з клієнтом"
+    (has_distributed): напряму перепитує Kommo — чи заявка справді ще
+    в 'Распределены' за тим самим менеджером. Якщо ні (вебхук про
+    закриття/передачу не долетів) — переводить менеджера у стан
+    "зміна закінчилась" (а не назад в активну чергу — див. коментар
+    у _release_to_shift_ended в queue_logic.py).
+    """
+    msg = await message.reply_text("📡 Перевіряю заявки 'на зв'язку' в Kommo... зачекайте")
+    try:
+        result   = await reconcile_distributed_leads()
+        checked  = result['checked']
+        released = result['released']
+
+        if not released:
+            await msg.edit_text(
+                f"✅ Перевірено заявок: <b>{checked}</b>\n"
+                f"Усі актуальні — нікого не чіпали",
+                parse_mode='HTML',
+            )
+        else:
+            lines = [
+                f"✅ Перевірено заявок: <b>{checked}</b>",
+                f"🌙 Переведено у 'зміна закінчилась': <b>{len(released)}</b>\n",
+            ]
+            for lead_id, name in released:
+                lines.append(f"  • <b>{name}</b> — заявка <code>{lead_id}</code>")
+            await msg.edit_text('\n'.join(lines), parse_mode='HTML')
+    except Exception as e:
+        await msg.edit_text(f"❌ Помилка перевірки: {e}")
+        logger.error(f"Check distributed error: {e}")
+
+
 async def _handle_managers_list(message):
     """Показує список всіх менеджерів у БД та заявки на схвалення."""
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -460,3 +498,5 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _handle_managers_list(update.message)
     elif text == "🧹 Прибрати привиди":
         await _handle_cleanup_orphans(update.message)
+    elif text == "📡 Перевірити на зв'язку":
+        await _handle_check_distributed(update.message)

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone as _timezone
+from typing import Optional
 
 # Єдина timezone для всього модуля (Київ, UTC+3)
 _TZ = _timezone(timedelta(hours=3))
@@ -13,6 +14,7 @@ from telegram.error import Forbidden
 
 from config import (
     TIMEOUT_PERSONAL, TIMEOUT_WARN, TIMEOUT_SOS, TIMEOUT_REBROADCAST, SCHEDULER_TICK,
+    AMO_PIPELINE_ID, AMO_DISTRIBUTED_PIPELINE_ID, AMO_DISTRIBUTED_STATUS_ID,
 )
 from db import (
     q, get_lead, get_all_taken, get_all_availability, get_all_max_leads_overrides,
@@ -20,6 +22,7 @@ from db import (
     get_all_msgs, claim_lead_for_send, delete_msg, is_available, set_availability,
     get_all_managers, get_manager, get_exit_reason,
     add_distributed_lead, remove_distributed_lead, count_distributed_leads, get_distributed_lead,
+    get_all_distributed_leads,
     transfer_taken, get_connected, get_managers_dict, get_all_exit_reasons, get_status_chats,
     get_all_held_leads, remove_held_lead,
 )
@@ -1043,3 +1046,146 @@ async def on_lead_undistributed(lead_id: str, manager_id: str):
         )
     except Exception as e:
         logger.warning(f"on_lead_undistributed: не вдалось повідомити {manager_id}: {e}")
+
+
+async def _is_lead_still_distributed(lead_id: str, tracked_manager_id: str) -> bool:
+    """
+    Перепитує Kommo API напряму — чи заявка досі реально в статусі
+    'Распределены' і закріплена за тим самим менеджером, якого ми трекаємо
+    в distributed_leads. Той самий принцип перевірки, що й у webhook.py
+    для події "покинула 'Распределены'", але викликається вручну (не з
+    вебхука), тому тут немає pipeline_id/status_id з тіла події — довіряємо
+    лише свіжим даним з get_lead_info().
+    """
+    from kommo import get_lead_info
+
+    info = await get_lead_info(lead_id)
+    if not info:
+        # Заявку не вдалось отримати (видалена, чи Kommo недоступна після
+        # ретраїв) — вважаємо, що вона більше не 'Распределены'.
+        return False
+
+    pipeline_id = str(info.get('pipeline_id'))
+    status_id   = str(info.get('status_id'))
+
+    if pipeline_id == AMO_DISTRIBUTED_PIPELINE_ID and status_id == AMO_DISTRIBUTED_STATUS_ID:
+        return True
+
+    if pipeline_id == AMO_PIPELINE_ID:
+        # Могли повернути заявку в гарячу воронку з тим самим відповідальним —
+        # це наше власне відлуння (PATCH від "Беру в роботу"), а не реальна
+        # передача. Звільняємо тільки якщо відповідальний справді змінився.
+        tracked_mgr      = await get_manager(tracked_manager_id)
+        tracked_kommo_id = tracked_mgr['kommo_id'] if tracked_mgr else None
+        return info.get('responsible_user_id') == tracked_kommo_id
+
+    return False
+
+
+async def _release_to_shift_ended(lead_id: str, manager_id: str) -> Optional[str]:
+    """
+    Той самий cleanup, що й on_lead_undistributed(), АЛЕ замість повернення
+    менеджера в активну чергу — переводить його у стан "зміна закінчилась"
+    (exit_reason='schedule'), так само як при звичайному завершенні розкладу.
+
+    Навіщо не повертати в чергу: якщо вебхук про закриття/передачу заявки
+    не долетів, і менеджер завис заблокованим — це майже завжди означає, що
+    його зміна вже й так закінчилась (типовий кейс: адмін бачить менеджера,
+    який зараз не працює, але заблокований старою заявкою). Автоматично
+    кидати такого менеджера назад в активну чергу небезпечно — тож ставимо
+    його у той самий стан, що й звичайний кінець зміни, а не в чергу.
+
+    Повертає ім'я менеджера, якщо когось реально перевели, інакше None.
+    """
+    row = await get_distributed_lead(lead_id)
+    kept_in_queue = bool(row.get('kept_in_queue')) if row else False
+
+    await remove_distributed_lead(lead_id)
+
+    remaining = await count_distributed_leads(manager_id)
+    if remaining > 0:
+        logger.info(
+            f"_release_to_shift_ended: {manager_id} ще має {remaining} заявок у 'Распределены'"
+        )
+        return None
+
+    if kept_in_queue:
+        logger.info(
+            f"_release_to_shift_ended: заявка {lead_id} — реактивація, "
+            f"{manager_id} з черги й не виводили, нічого не змінюємо"
+        )
+        return None
+
+    mgr = await get_manager(manager_id)
+    if not mgr:
+        return None
+
+    name = mgr['sheet_name'] or mgr['tg_name'] or manager_id
+
+    # Не чіпаємо, якщо менеджер вже поза чергою з іншої причини (вручну/розклад) —
+    # той самий принцип, що й в on_lead_undistributed().
+    exit_reason = await get_exit_reason(manager_id)
+    if exit_reason is not None and exit_reason != 'has_distributed':
+        logger.info(
+            f"_release_to_shift_ended: {name} ({manager_id}) — вже поза чергою з іншої "
+            f"причини ({exit_reason}), не чіпаємо"
+        )
+        return None
+
+    await set_availability(manager_id, False, reason='schedule')
+    await handle_manager_exit(manager_id)
+    logger.info(f"_release_to_shift_ended: {name} ({manager_id}) → переведено у 'зміна закінчилась'")
+
+    try:
+        await state._app.bot.send_message(
+            chat_id=manager_id,
+            text=(
+                "🌙 <b>Твоя зміна закінчилась</b>\n\n"
+                "Заявка «Распределены» вже закрита або передана іншому — "
+                "тебе виведено з черги."
+            ),
+            parse_mode='HTML',
+        )
+    except Exception as e:
+        logger.warning(f"_release_to_shift_ended: не вдалось повідомити {manager_id}: {e}")
+
+    return name
+
+
+async def reconcile_distributed_leads() -> dict:
+    """
+    Ручна звірка (адмін-кнопка "📡 Перевірити на зв'язку"): для кожного
+    запису в distributed_leads напряму перепитує Kommo — чи заявка справді
+    ще в 'Распределены'. Якщо ні — переводить менеджера у стан "зміна
+    закінчилась" (див. _release_to_shift_ended) замість автоматичного
+    повернення в чергу.
+
+    Навіщо: on_lead_undistributed() спрацьовує лише за вебхуком від Kommo.
+    Якщо вебхук не долетів (мережева проблема на боці Kommo, конфлікт
+    подій тощо) — менеджер лишається заблокованим "на зв'язку з клієнтом"
+    назавжди, хоча заявка вже давно закрита чи передана іншому. Ця функція —
+    той самий фікс, просто ІНІЦІЙОВАНИЙ вручну, а не подією.
+    """
+    rows     = await get_all_distributed_leads()
+    checked  = len(rows)
+    released = []
+
+    for row in rows:
+        lead_id    = row['lead_id']
+        manager_id = row['manager_id']
+        try:
+            still = await _is_lead_still_distributed(lead_id, manager_id)
+        except Exception as e:
+            logger.error(f"reconcile_distributed_leads: заявка {lead_id}: {e}")
+            continue
+
+        if not still:
+            logger.info(
+                f"reconcile_distributed_leads: заявка {lead_id} ({manager_id}) — "
+                f"вже не в 'Распределены', переводимо в 'зміна закінчилась'"
+            )
+            name = await _release_to_shift_ended(lead_id, manager_id)
+            if name:
+                released.append((lead_id, name))
+
+    return {'checked': checked, 'released': released}

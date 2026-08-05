@@ -505,6 +505,13 @@ async def get_manager_distributed_leads(manager_id: str) -> list[str]:
     return [r['lead_id'] for r in (rows or [])]
 
 
+async def get_all_distributed_leads() -> list[dict]:
+    """Усі активні записи 'Распределены' — для ручної звірки зі станом у Kommo
+    (на випадок, якщо вебхук про закриття/передачу заявки не долетів)."""
+    rows = await q("SELECT * FROM distributed_leads", fetch='all')
+    return [dict(r) for r in (rows or [])]
+
+
 # ─── ЗАЯВКИ НА УТРИМАННІ (до 9:00 за часом клієнта) ─────────────────────────
 
 async def add_held_lead(lead_id: str, title: str, phone: Optional[str], timezone: str):
