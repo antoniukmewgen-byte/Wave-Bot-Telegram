@@ -10,7 +10,7 @@ from config import (
     AMO_SUBDOMAIN, AMO_TOKEN, AMO_PIPELINE_ID, AMO_HOT_STATUS_ID, HOT_STATUSES,
     AMO_SOURCE_FIELD_ID, AMO_REACTIVATION_ENUM_ID,
 )
-from db import q, get_lead, get_manager
+from db import q, get_lead, get_manager, get_held_lead
 from notifications import remove_from_others
 
 logger = logging.getLogger(__name__)
@@ -373,6 +373,12 @@ async def sync_from_kommo() -> tuple[int, int, int]:
             lead_id = str(lead["id"])
             kommo_ids.add(lead_id)
             if await get_lead(lead_id):
+                skipped += 1
+                continue
+            if await get_held_lead(lead_id):
+                # Заявку свідомо заморожено до ранку клієнта (held_leads) —
+                # її немає в leads, але це НЕ "нова" заявка. Пропускаємо,
+                # інакше синхронізація передчасно поверне її в чергу.
                 skipped += 1
                 continue
             title   = make_lead_title(AMO_HOT_STATUS_ID, lead_id)
