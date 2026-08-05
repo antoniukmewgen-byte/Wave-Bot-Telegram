@@ -833,12 +833,34 @@ async def _release_held_leads():
     настало 9:00 за його місцевим часом на момент приходу вебхука — див.
     webhook.py). Як тільки в клієнта настає 9:00 — заявка переводиться в
     звичайну чергу leads і одразу пропонується менеджерам.
+
+    Також достроково звільняє заявки з джерелом "Реактивация" (перевіряє це
+    тільки для тих, у кого ранок ще не настав, щоб не робити зайвих API-
+    запитів). Це "запобіжник заднім числом": заявки, які встигли потрапити
+    в held_leads ДО того, як реактивацію почали виключати з ранкової
+    перевірки (ручним прогоном "🌙 Звірити ранкові ліди" чи через webhook),
+    самі собою розморозяться в межах хвилини після деплою цього фіксу —
+    ніяких ручних дій не треба.
     """
+    from kommo import get_lead_info, is_lead_reactivation
+
     held = await get_all_held_leads()
     for row in held:
-        if not is_client_morning(row['timezone']):
-            continue
         lead_id = row['lead_id']
+
+        if not is_client_morning(row['timezone']):
+            try:
+                info = await get_lead_info(lead_id)
+            except Exception as e:
+                logger.error(f"_release_held_leads: get_lead_info {lead_id}: {e}")
+                info = None
+            if not (info and is_lead_reactivation(info)):
+                continue
+            logger.info(
+                f"_release_held_leads: заявка {lead_id} — джерело 'Реактивация', "
+                f"звільняємо достроково (ранок у клієнта ще не настав)"
+            )
+
         try:
             await q(
                 "INSERT OR IGNORE INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
