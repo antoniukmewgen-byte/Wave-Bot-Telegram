@@ -17,7 +17,7 @@ from kommo import sync_from_kommo
 from notifications import send_long, notify_admin_error
 from queue_logic import (
     day_key, _build_sent_map, cleanup_orphaned_manager_messages, build_manager_status_text,
-    reconcile_distributed_leads,
+    reconcile_distributed_leads, resweep_active_leads_for_client_time,
 )
 from sheets import fetch_managers_async
 
@@ -31,7 +31,7 @@ ADMIN_KB = ReplyKeyboardMarkup(
         [KeyboardButton("🔄 Синхронізація"),     KeyboardButton("🔌 Підключення")],
         [KeyboardButton("⏰ Розклади"),           KeyboardButton("🔍 Діагностика")],
         [KeyboardButton("👤 Менеджери"),          KeyboardButton("🧹 Прибрати привиди")],
-        [KeyboardButton("📡 Перевірити на зв'язку")],
+        [KeyboardButton("📡 Перевірити на зв'язку"), KeyboardButton("🌙 Звірити ранкові ліди")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -428,6 +428,37 @@ async def _handle_check_distributed(message):
         logger.error(f"Check distributed error: {e}")
 
 
+async def _handle_resweep_morning(message):
+    """
+    Ручний "дозавантаж" ранкової перевірки (задніх числом) для заявок, які
+    вже лежать в активній черзі/розсилці, але потрапили туди повз webhook
+    (напр. sync), і тому перевірку "чи настало 9:00 у клієнта" не проходили.
+    """
+    msg = await message.reply_text("🌙 Звіряю активні заявки за часом клієнта... зачекайте")
+    try:
+        result  = await resweep_active_leads_for_client_time()
+        checked = result['checked']
+        held    = result['held']
+
+        if not held:
+            await msg.edit_text(
+                f"✅ Перевірено заявок: <b>{checked}</b>\n"
+                f"У всіх клієнтів уже настав ранок — нікого не знімали",
+                parse_mode='HTML',
+            )
+        else:
+            lines = [
+                f"✅ Перевірено заявок: <b>{checked}</b>",
+                f"🌙 Знято до ранку: <b>{len(held)}</b>\n",
+            ]
+            for lead_id, tz_name in held:
+                lines.append(f"  • <code>{lead_id}</code> — {tz_name}")
+            await msg.edit_text('\n'.join(lines), parse_mode='HTML')
+    except Exception as e:
+        await msg.edit_text(f"❌ Помилка звірки: {e}")
+        logger.error(f"Resweep morning error: {e}")
+
+
 async def _handle_managers_list(message):
     """Показує список всіх менеджерів у БД та заявки на схвалення."""
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -500,3 +531,5 @@ async def on_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _handle_cleanup_orphans(update.message)
     elif text == "📡 Перевірити на зв'язку":
         await _handle_check_distributed(update.message)
+    elif text == "🌙 Звірити ранкові ліди":
+        await _handle_resweep_morning(update.message)

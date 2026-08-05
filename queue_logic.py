@@ -24,13 +24,13 @@ from db import (
     add_distributed_lead, remove_distributed_lead, count_distributed_leads, get_distributed_lead,
     get_all_distributed_leads,
     transfer_taken, get_connected, get_managers_dict, get_all_exit_reasons, get_status_chats,
-    get_all_held_leads, remove_held_lead,
+    get_all_held_leads, remove_held_lead, add_held_lead,
 )
-from phone_timezone import is_client_morning
+from phone_timezone import is_client_morning, resolve_client_timezone
 from notifications import (
     notify_admins, notify_admin_error, send_to, edit_msg, delete_and_send, remove_from_others,
     cleanup_stale_messages, remove_buttons_for_manager, delete_messages_for_manager,
-    send_long_to_chat, _deactivate_blocked,
+    send_long_to_chat, _deactivate_blocked, schedule_cleanup,
 )
 from sheets import fetch_managers_async
 
@@ -754,6 +754,66 @@ async def _check_status_broadcast():
     now = datetime.now(_TZ)
     if now.strftime('%H:%M') in _STATUS_BROADCAST_HOURS:
         await broadcast_manager_status()
+
+
+async def resweep_active_leads_for_client_time() -> dict:
+    """
+    Ручна звірка (адмін-кнопка "🌙 Звірити ранкові ліди"): проганяє ВСІ активні
+    заявки (усе, крім taken/duplicate/closed — тобто no_managers/queued/
+    broadcast/sent) через ту саму перевірку "чи настало 9:00 у клієнта", що
+    й webhook.py робить для нових заявок.
+
+    Навіщо: ця перевірка рахується лише ОДИН раз — у момент приходу вебхука
+    про нову заявку. Заявки, які вже лежали в leads до появи цієї фічі (або
+    потрапили туди повз webhook, напр. через sync_from_kommo), її не
+    проходили. Ця функція — ручний "дозавантаж" заднім числом: якщо в
+    клієнта ще не 9:00, знімає заявку з активної черги/розсилки (як і при
+    закритті — прибирає повідомлення в менеджерів, якщо вони є) і переносить
+    у held_leads. Звідти її поверне назад в чергу _release_held_leads(),
+    щойно в клієнта настане 9:00 — так само, як і звичайні "ранкові" ліди.
+    """
+    from kommo import get_lead_phone
+
+    rows = await q(
+        "SELECT lead_id, title FROM leads WHERE status NOT IN ('taken','duplicate','closed')",
+        fetch='all',
+    )
+    checked = len(rows or [])
+    held    = []
+
+    for row in (rows or []):
+        lead_id = row['lead_id']
+        title   = row['title']
+        try:
+            phone = await get_lead_phone(lead_id)
+        except Exception as e:
+            logger.error(f"resweep_active_leads_for_client_time: телефон {lead_id}: {e}")
+            phone = None
+
+        tz_name = resolve_client_timezone(phone)
+        if is_client_morning(tz_name):
+            continue
+
+        try:
+            await add_held_lead(lead_id, title, phone, tz_name)
+        except Exception as e:
+            logger.error(f"resweep_active_leads_for_client_time: held_leads запис {lead_id}: {e}")
+            continue
+
+        # Прибираємо з активної розсилки: повідомлення в менеджерів (якщо є) —
+        # той самий шлях, що й при закритті заявки (remove_from_others +
+        # schedule_cleanup), плюс видаляємо сам рядок з leads, щоб
+        # _release_held_leads() пізніше могла вставити його заново.
+        await remove_from_others(lead_id, note="🌙 Заявку тимчасово знято — у клієнта ще не настав ранок")
+        schedule_cleanup(lead_id)
+        await q("DELETE FROM leads WHERE lead_id=?", (lead_id,))
+
+        logger.info(
+            f"resweep_active_leads_for_client_time: заявка {lead_id} → held_leads ({tz_name})"
+        )
+        held.append((lead_id, tz_name))
+
+    return {'checked': checked, 'held': held}
 
 
 async def _release_held_leads():
