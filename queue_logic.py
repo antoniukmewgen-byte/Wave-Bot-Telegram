@@ -1229,23 +1229,34 @@ async def reconcile_distributed_leads() -> dict:
     rows     = await get_all_distributed_leads()
     checked  = len(rows)
     released = []
+    details  = []  # [(lead_id, manager_name, still_distributed: bool, note: str)] — для звіту адміну
 
     for row in rows:
         lead_id    = row['lead_id']
         manager_id = row['manager_id']
+        mgr        = await get_manager(manager_id)
+        name       = (mgr['sheet_name'] or mgr['tg_name'] or manager_id) if mgr else manager_id
+
         try:
             still = await _is_lead_still_distributed(lead_id, manager_id)
         except Exception as e:
             logger.error(f"reconcile_distributed_leads: заявка {lead_id}: {e}")
+            details.append((lead_id, name, None, f"помилка перевірки: {e}"))
             continue
 
-        if not still:
-            logger.info(
-                f"reconcile_distributed_leads: заявка {lead_id} ({manager_id}) — "
-                f"вже не в 'Распределены', переводимо в 'зміна закінчилась'"
-            )
-            name = await _release_to_shift_ended(lead_id, manager_id)
-            if name:
-                released.append((lead_id, name))
+        if still:
+            details.append((lead_id, name, True, "актуальна, у роботі"))
+            continue
 
-    return {'checked': checked, 'released': released}
+        logger.info(
+            f"reconcile_distributed_leads: заявка {lead_id} ({manager_id}) — "
+            f"вже не в 'Распределены', переводимо в 'зміна закінчилась'"
+        )
+        released_name = await _release_to_shift_ended(lead_id, manager_id)
+        if released_name:
+            released.append((lead_id, released_name))
+            details.append((lead_id, name, False, "звільнено → 'зміна закінчилась'"))
+        else:
+            details.append((lead_id, name, False, "вже не 'Распределены', але звільнення не знадобилось"))
+
+    return {'checked': checked, 'released': released, 'details': details}

@@ -408,6 +408,7 @@ async def _handle_check_distributed(message):
         result   = await reconcile_distributed_leads()
         checked  = result['checked']
         released = result['released']
+        details  = result.get('details', [])
 
         if not released:
             await msg.edit_text(
@@ -423,6 +424,13 @@ async def _handle_check_distributed(message):
             for lead_id, name in released:
                 lines.append(f"  • <b>{name}</b> — заявка <code>{lead_id}</code>")
             await msg.edit_text('\n'.join(lines), parse_mode='HTML')
+
+        if details:
+            detail_lines = ["📋 <b>Деталі перевірки:</b>"]
+            for lead_id, name, still, note in details:
+                icon = "✅" if still else ("❌" if still is False else "⚠️")
+                detail_lines.append(f"{icon} <b>{name}</b> — заявка <code>{lead_id}</code>: {note}")
+            await send_long(message, '\n'.join(detail_lines))
     except Exception as e:
         await msg.edit_text(f"❌ Помилка перевірки: {e}")
         logger.error(f"Check distributed error: {e}")
