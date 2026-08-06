@@ -860,6 +860,25 @@ async def _release_held_leads():
                 f"_release_held_leads: заявка {lead_id} — джерело 'Реактивация', "
                 f"звільняємо достроково (ранок у клієнта ще не настав)"
             )
+        else:
+            # Настав ранок — перш ніж випустити заявку в живу чергу, перевіряємо,
+            # що вона й досі існує в Kommo. Заявку могли видалити, поки вона
+            # була заморожена (а delete-вебхук міг не долетіти чи прийти до
+            # деплою фіксу в held_leads) — без цієї перевірки бот сліпо ставив
+            # би в чергу й роздавав менеджеру заявку-привида (як сталось із
+            # заявкою 26148047).
+            try:
+                info = await get_lead_info(lead_id)
+            except Exception as e:
+                logger.error(f"_release_held_leads: get_lead_info {lead_id}: {e}")
+                info = None
+            if not info:
+                await remove_held_lead(lead_id)
+                logger.warning(
+                    f"_release_held_leads: заявка {lead_id} не знайдена в Kommo "
+                    f"(видалена?) — прибираємо з held_leads без видачі в чергу"
+                )
+                continue
 
         try:
             await q(

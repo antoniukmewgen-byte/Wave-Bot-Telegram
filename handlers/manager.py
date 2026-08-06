@@ -11,8 +11,9 @@ from db import (
     q, get_lead, get_taken, get_all_max_leads_overrides,
     is_available, set_availability, mark_connected, mark_skipped, get_skipped, take_lead,
     get_last_connected_ts, get_manager, get_manager_distributed_leads, add_distributed_lead,
+    remove_distributed_lead,
 )
-from kommo import set_kommo_responsible
+from kommo import set_kommo_responsible, get_lead_info
 from notifications import notify_admins, notify_admin_error, edit_msg, remove_from_others, schedule_cleanup, schedule_delete_msg, remove_buttons_for_manager, safe_answer as _safe_answer
 from queue_logic import assign_next, day_key, build_keyboard, restore_buttons_for_manager, handle_manager_exit
 from sheets import fetch_managers_async, get_block_reason
@@ -247,6 +248,41 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kommo_ok = await set_kommo_responsible(lead_id, manager_id)
             if kommo_ok:
                 await edit_msg(manager_id, lead_id, f"✅ Ви взяли заявку в роботу! | Відповідальний: {mgr_name}\n\n{lead['title']}")
+            else:
+                # Прив'язка в Kommo не вдалась — перевіряємо, чи заявка взагалі
+                # ще існує. Якщо ні (видалена в CRM, поки летів вебхук про
+                # взяття) — це заявка-привид: без відкату менеджер лишався б
+                # заблокованим (не в черзі, з "розподіленою" заявкою, яка
+                # ніколи не покине статус 'Распределены', бо її вже немає),
+                # і виправити це міг тільки ручний "📡 Перевірити на зв'язку"
+                # (як сталось із заявкою 26148047).
+                info = None
+                try:
+                    info = await get_lead_info(lead_id)
+                except Exception as e:
+                    logger.error(f"take {lead_id}: get_lead_info після невдалої прив'язки: {e}")
+
+                if not info:
+                    await q("UPDATE leads SET status='closed' WHERE lead_id=?", (lead_id,))
+                    await remove_distributed_lead(lead_id)
+                    await edit_msg(
+                        manager_id, lead_id,
+                        f"⚠️ Заявку не вдалось прив'язати в Kommo (не знайдена) — заявку закрито\n\n{lead['title']}",
+                    )
+                    if not await is_available(manager_id):
+                        await set_availability(manager_id, True, reason=None)
+                        await restore_buttons_for_manager(manager_id)
+                    await notify_admins(
+                        f"⚠️ Заявка {lead_id} — не знайдена в Kommo, взяття скасовано, "
+                        f"{mgr_name} повернутий(а) у чергу"
+                    )
+                    logger.warning(f"take {lead_id}: заявка-привид, відкат взяття для {mgr_name}")
+                    return
+                else:
+                    await notify_admin_error(
+                        f"set_kommo_responsible не вдалось (заявка {lead_id})",
+                        Exception("Kommo assign failed, лід існує"), manager_id,
+                    )
             await remove_from_others(lead_id, except_id=manager_id,
                                      note=f"✅ Заявку взяв(ла) <b>{mgr_name}</b>")
             schedule_cleanup(lead_id)
