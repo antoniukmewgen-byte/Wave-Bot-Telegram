@@ -11,7 +11,7 @@ from config import (
     AMO_PIPELINE_ID, AMO_HOT_STATUS_ID,
     AMO_DISTRIBUTED_STATUS_ID, AMO_DISTRIBUTED_PIPELINE_ID,
 )
-from db import q, get_lead, get_distributed_lead, add_held_lead
+from db import q, get_lead, get_distributed_lead, add_held_lead, get_held_lead, remove_held_lead
 from kommo import make_lead_title, get_lead_info, get_lead_phone, is_lead_reactivation
 from notifications import notify_admin_error, remove_from_others, schedule_cleanup
 from phone_timezone import resolve_client_timezone, is_client_morning
@@ -172,6 +172,15 @@ async def _handle_lead_event(event: dict):
             await remove_from_others(lead_id, note="🗑 Заявку видалено в CRM")
             schedule_cleanup(lead_id)
             logger.info(f"Webhook: заявка {lead_id} видалена в CRM → закрито в боті")
+
+        # Заявку могли видалити, поки вона ще "заморожена" в held_leads (чекала
+        # ранку клієнта) — без цієї перевірки запис лишався б там навічно:
+        # _release_held_leads() щохвилини намагався б отримати вже неіснучу
+        # заявку з Kommo, отримував би HTTP 204/404 і писав ERROR у лог нескінченно.
+        held_row = await get_held_lead(lead_id)
+        if held_row:
+            await remove_held_lead(lead_id)
+            logger.info(f"Webhook: заявка {lead_id} видалена в CRM → прибрано з held_leads")
 
         # Заявку могли видалити прямо зі статусу "Распределены" — цю гілку
         # webhook'а вище (is_delete) не перетинається з логікою нижче, тому
