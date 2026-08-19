@@ -2,9 +2,14 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone as _timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 # Єдина timezone для всього модуля (Київ, UTC+3)
 _TZ = _timezone(timedelta(hours=3))
+
+# Часовий пояс для другого автоматичного прогону resweep_active_leads_for_client_time()
+# (див. build_scheduler) — ZoneInfo, а не фіксований offset, щоб сам перемикав EST/EDT.
+_NY_TZ = ZoneInfo("America/New_York")
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -758,19 +763,31 @@ async def _check_status_broadcast():
 
 async def resweep_active_leads_for_client_time() -> dict:
     """
-    Ручна звірка (адмін-кнопка "🌙 Звірити ранкові ліди"): проганяє ВСІ активні
-    заявки (усе, крім taken/duplicate/closed — тобто no_managers/queued/
-    broadcast/sent) через ту саму перевірку "чи настало 9:00 у клієнта", що
-    й webhook.py робить для нових заявок.
+    Проганяє ВСІ активні заявки (усе, крім taken/duplicate/closed — тобто
+    no_managers/queued/broadcast/sent) через ту саму перевірку "чи настало
+    9:00 у клієнта", що й webhook.py робить для нових заявок.
 
-    Навіщо: ця перевірка рахується лише ОДИН раз — у момент приходу вебхука
-    про нову заявку. Заявки, які вже лежали в leads до появи цієї фічі (або
-    потрапили туди повз webhook, напр. через sync_from_kommo), її не
-    проходили. Ця функція — ручний "дозавантаж" заднім числом: якщо в
-    клієнта ще не 9:00, знімає заявку з активної черги/розсилки (як і при
-    закритті — прибирає повідомлення в менеджерів, якщо вони є) і переносить
-    у held_leads. Звідти її поверне назад в чергу _release_held_leads(),
+    Навіщо: перевірка "чи ранок у клієнта" в webhook.py рахується лише ОДИН
+    раз — у момент приходу вебхука про нову заявку. Якщо на той момент у
+    клієнта вже було ранку (is_client_morning), заявка лишається в живій
+    черзі назавжди — навіть якщо потім настає її локальна північ і до
+    ранку знову далеко. Ця функція — регулярний "дозавантаж": для кожної
+    активної заявки перевіряє її ПОТОЧНИЙ стан і, якщо в клієнта зараз ще
+    не 9:00, знімає заявку з активної черги/розсилки (як і при закритті —
+    прибирає повідомлення в менеджерів, якщо вони є) і переносить у
+    held_leads. Звідти її поверне назад в чергу _release_held_leads(),
     щойно в клієнта настане 9:00 — так само, як і звичайні "ранкові" ліди.
+
+    Запускається автоматично планувальником (build_scheduler(), job'и
+    'resweep_morning_ua' / 'resweep_morning_ny') двічі на добу — о 00:00 за
+    Києвом (ловить українські номери, чия північ саме настала) і о 00:00 за
+    Нью-Йорком (ловить іноземні: реальні US-номери поза Eastern-поясом
+    ловляться з похибкою в кілька годин, а весь фолбек на нерозпізнані/
+    неамериканські/неукраїнські номери — рівно America/New_York, тож для
+    більшості "іноземних" заявок це і є точний момент). Раніше це
+    доводилось робити вручну по кнопці "🌙 Звірити ранкові ліди" двічі на
+    день; кнопка лишається як ручний тригер поза розкладом (напр. одразу
+    після деплою чи для позапланової перевірки).
     """
     from kommo import get_lead_phone, get_lead_info, is_lead_reactivation
 
@@ -959,6 +976,19 @@ def build_scheduler() -> AsyncIOScheduler:
         _scheduler_job('stale_cleanup', cleanup_stale_messages),
         IntervalTrigger(seconds=300, timezone=_TZ),
         id='stale_cleanup', max_instances=1,
+    )
+    # Автоматична заміна ручної кнопки "🌙 Звірити ранкові ліди": о 00:00 за
+    # Києвом (українські номери) і о 00:00 за Нью-Йорком (іноземні — див.
+    # докстрінг resweep_active_leads_for_client_time()).
+    scheduler.add_job(
+        _scheduler_job('resweep_morning_ua', resweep_active_leads_for_client_time),
+        CronTrigger(hour=0, minute=0, timezone=_TZ),
+        id='resweep_morning_ua', max_instances=1,
+    )
+    scheduler.add_job(
+        _scheduler_job('resweep_morning_ny', resweep_active_leads_for_client_time),
+        CronTrigger(hour=0, minute=0, timezone=_NY_TZ),
+        id='resweep_morning_ny', max_instances=1,
     )
     return scheduler
 
