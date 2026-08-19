@@ -197,6 +197,36 @@ async def get_lead_info(lead_id: str) -> Optional[dict]:
         return None
 
 
+async def lead_confirmed_missing(lead_id: str) -> bool:
+    """
+    True лише якщо Kommo ЯВНО підтвердила, що заявки не існує (фатальна
+    HTTP-помилка на кшталт 204/404 для конкретного lead_id — той самий
+    _KommoFatalError, що й у get_lead_info).
+
+    False у БУДЬ-ЯКОМУ іншому випадку — і якщо заявка реально є, і якщо
+    сталась мережева/тимчасова помилка (напр. "Server disconnected", що
+    в проді трапляється по кілька разів на день і НЕ ретраїться, бо це
+    обрив з'єднання, а не HTTP 429/5xx).
+
+    Навіщо окремо від get_lead_info(): той повертає None і при 204/404,
+    і при мережевому збої — не розрізняючи ці випадки. Для дій, які
+    незворотні (видалення заявки з held_leads без видачі в чергу,
+    закриття щойно взятої заявки) — не можна прирівнювати "невідомо" до
+    "підтверджено видалено", інакше короткий обрив з'єднання назавжди
+    губить реальний лід. Викликач має трактувати False як "нічого не
+    підтверджено, лишаємо як є, спробуємо пізніше".
+    """
+    if not AMO_TOKEN:
+        return False
+    try:
+        await _fetch_lead_info(lead_id)
+        return False
+    except _KommoFatalError:
+        return True
+    except Exception:
+        return False
+
+
 def is_lead_reactivation(info: dict) -> bool:
     """
     Перевіряє кастомне поле "Источник" (field_id=AMO_SOURCE_FIELD_ID) заявки —

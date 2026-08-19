@@ -13,7 +13,7 @@ from db import (
     get_last_connected_ts, get_manager, get_manager_distributed_leads, add_distributed_lead,
     remove_distributed_lead,
 )
-from kommo import set_kommo_responsible, get_lead_info
+from kommo import set_kommo_responsible, lead_confirmed_missing
 from notifications import notify_admins, notify_admin_error, edit_msg, remove_from_others, schedule_cleanup, schedule_delete_msg, remove_buttons_for_manager, safe_answer as _safe_answer
 from queue_logic import assign_next, day_key, build_keyboard, restore_buttons_for_manager, handle_manager_exit
 from sheets import fetch_managers_async, get_block_reason
@@ -256,13 +256,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # ніколи не покине статус 'Распределены', бо її вже немає),
                 # і виправити це міг тільки ручний "📡 Перевірити на зв'язку"
                 # (як сталось із заявкою 26148047).
-                info = None
+                #
+                # Відкочуємо взяття ТІЛЬКИ при підтвердженій відсутності ліда
+                # (204/404) — set_kommo_responsible() міг впасти і через
+                # звичайний мережевий збій (напр. "Server disconnected"), і
+                # прирівнювати це до "заявки не існує" означало б помилково
+                # закривати реальні щойно взяті заявки.
+                confirmed_missing = False
                 try:
-                    info = await get_lead_info(lead_id)
+                    confirmed_missing = await lead_confirmed_missing(lead_id)
                 except Exception as e:
-                    logger.error(f"take {lead_id}: get_lead_info після невдалої прив'язки: {e}")
+                    logger.error(f"take {lead_id}: lead_confirmed_missing після невдалої прив'язки: {e}")
 
-                if not info:
+                if confirmed_missing:
                     await q("UPDATE leads SET status='closed' WHERE lead_id=?", (lead_id,))
                     await remove_distributed_lead(lead_id)
                     await edit_msg(
@@ -279,9 +285,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.warning(f"take {lead_id}: заявка-привид, відкат взяття для {mgr_name}")
                     return
                 else:
+                    # Лід не підтверджено видаленим (існує, або перевірка сама
+                    # не вдалась через мережу) — покладаємось на подальшу ручну
+                    # звірку/ретраї, лишаємо стан як є, але сповіщаємо адміна.
                     await notify_admin_error(
                         f"set_kommo_responsible не вдалось (заявка {lead_id})",
-                        Exception("Kommo assign failed, лід існує"), manager_id,
+                        Exception("Kommo assign failed, видалення не підтверджено"), manager_id,
                     )
             await remove_from_others(lead_id, except_id=manager_id,
                                      note=f"✅ Заявку взяв(ла) <b>{mgr_name}</b>")

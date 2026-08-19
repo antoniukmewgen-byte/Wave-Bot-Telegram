@@ -842,7 +842,7 @@ async def _release_held_leads():
     самі собою розморозяться в межах хвилини після деплою цього фіксу —
     ніяких ручних дій не треба.
     """
-    from kommo import get_lead_info, is_lead_reactivation
+    from kommo import get_lead_info, is_lead_reactivation, lead_confirmed_missing
 
     held = await get_all_held_leads()
     for row in held:
@@ -867,12 +867,19 @@ async def _release_held_leads():
             # деплою фіксу в held_leads) — без цієї перевірки бот сліпо ставив
             # би в чергу й роздавав менеджеру заявку-привида (як сталось із
             # заявкою 26148047).
+            #
+            # ВАЖЛИВО: видаляємо з held_leads БЕЗ видачі в чергу тільки при
+            # ПІДТВЕРДЖЕНІЙ фатальній помилці (204/404) — get_lead_info()
+            # також повертає None при звичайному мережевому збої (напр.
+            # "Server disconnected", в проді буває по кілька разів на день),
+            # і прирівнювати "невідомо" до "видалено" означало б губити
+            # реальні заявки через тимчасовий обрив з'єднання.
             try:
-                info = await get_lead_info(lead_id)
+                confirmed_missing = await lead_confirmed_missing(lead_id)
             except Exception as e:
-                logger.error(f"_release_held_leads: get_lead_info {lead_id}: {e}")
-                info = None
-            if not info:
+                logger.error(f"_release_held_leads: lead_confirmed_missing {lead_id}: {e}")
+                confirmed_missing = False
+            if confirmed_missing:
                 await remove_held_lead(lead_id)
                 logger.warning(
                     f"_release_held_leads: заявка {lead_id} не знайдена в Kommo "
