@@ -2,14 +2,9 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone as _timezone
 from typing import Optional
-from zoneinfo import ZoneInfo
 
 # Єдина timezone для всього модуля (Київ, UTC+3)
 _TZ = _timezone(timedelta(hours=3))
-
-# Часовий пояс для другого автоматичного прогону resweep_active_leads_for_client_time()
-# (див. build_scheduler) — ZoneInfo, а не фіксований offset, щоб сам перемикав EST/EDT.
-_NY_TZ = ZoneInfo("America/New_York")
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -778,21 +773,24 @@ async def resweep_active_leads_for_client_time() -> dict:
     held_leads. Звідти її поверне назад в чергу _release_held_leads(),
     щойно в клієнта настане 9:00 — так само, як і звичайні "ранкові" ліди.
 
-    Запускається автоматично планувальником (build_scheduler(), job'и
-    'resweep_morning_ua' / 'resweep_morning_ny') двічі на добу — о 00:00 за
-    Києвом (ловить українські номери, чия північ саме настала) і о 00:00 за
-    Нью-Йорком (ловить іноземні: реальні US-номери поза Eastern-поясом
-    ловляться з похибкою в кілька годин, а весь фолбек на нерозпізнані/
-    неамериканські/неукраїнські номери — рівно America/New_York, тож для
-    більшості "іноземних" заявок це і є точний момент). Раніше це
-    доводилось робити вручну по кнопці "🌙 Звірити ранкові ліди" двічі на
-    день; кнопка лишається як ручний тригер поза розкладом (напр. одразу
-    після деплою чи для позапланової перевірки).
+    Запускається автоматично щохвилини разом з іншими перевірками
+    (build_scheduler() → 'minute_checks' → _run_minute_checks()). Це
+    безпечно робити так часто, бо phone/timezone/is_reactivation для
+    активних заявок КЕШУЮТЬСЯ в leads один раз — при створенні заявки
+    (webhook.py) чи при звільненні з held_leads (_release_held_leads) —
+    тому в типовому випадку тут немає жодного запиту в Kommo, лише читання
+    з локальної БД. У Kommo лізем лише для "старих" рядків без кешу
+    (створених до цієї міграції) — і одразу дозаповнюємо їх заднім числом.
+
+    Раніше це доводилось робити вручну по кнопці "🌙 Звірити ранкові ліди";
+    кнопка лишається як ручний тригер поза розкладом (напр. для позапланової
+    перевірки).
     """
     from kommo import get_lead_phone, get_lead_info, is_lead_reactivation
 
     rows = await q(
-        "SELECT lead_id, title FROM leads WHERE status NOT IN ('taken','duplicate','closed')",
+        "SELECT lead_id, title, phone, timezone, is_reactivation FROM leads "
+        "WHERE status NOT IN ('taken','duplicate','closed')",
         fetch='all',
     )
     checked = len(rows or [])
@@ -804,21 +802,35 @@ async def resweep_active_leads_for_client_time() -> dict:
 
         # Джерело "Реактивация" — стара угода, повернута в роботу, ранкову
         # перевірку для неї не робимо (так само як для нових лідів у webhook.py).
-        try:
-            info = await get_lead_info(lead_id)
-        except Exception as e:
-            logger.error(f"resweep_active_leads_for_client_time: get_lead_info {lead_id}: {e}")
-            info = None
-        if info and is_lead_reactivation(info):
+        # Уже відомо з кешу — жодного запиту в Kommo не треба.
+        if row['is_reactivation']:
             continue
 
-        try:
-            phone = await get_lead_phone(lead_id)
-        except Exception as e:
-            logger.error(f"resweep_active_leads_for_client_time: телефон {lead_id}: {e}")
-            phone = None
+        phone   = row['phone']
+        tz_name = row['timezone']
 
-        tz_name = resolve_client_timezone(phone)
+        if tz_name is None:
+            # Старий рядок без кешу (створений до цієї міграції) — рахуємо
+            # так само, як webhook.py, і дозаповнюємо leads заднім числом,
+            # щоб наступного разу піти "дешевим" шляхом без Kommo.
+            try:
+                info = await get_lead_info(lead_id)
+            except Exception as e:
+                logger.error(f"resweep_active_leads_for_client_time: get_lead_info {lead_id}: {e}")
+                info = None
+            if info and is_lead_reactivation(info):
+                await q("UPDATE leads SET is_reactivation=1 WHERE lead_id=?", (lead_id,))
+                continue
+
+            try:
+                phone = await get_lead_phone(lead_id)
+            except Exception as e:
+                logger.error(f"resweep_active_leads_for_client_time: телефон {lead_id}: {e}")
+                phone = None
+
+            tz_name = resolve_client_timezone(phone)
+            await q("UPDATE leads SET phone=?, timezone=? WHERE lead_id=?", (phone, tz_name, lead_id))
+
         if is_client_morning(tz_name):
             continue
 
@@ -864,6 +876,7 @@ async def _release_held_leads():
     held = await get_all_held_leads()
     for row in held:
         lead_id = row['lead_id']
+        is_reactivation = False
 
         if not is_client_morning(row['timezone']):
             try:
@@ -873,6 +886,7 @@ async def _release_held_leads():
                 info = None
             if not (info and is_lead_reactivation(info)):
                 continue
+            is_reactivation = True
             logger.info(
                 f"_release_held_leads: заявка {lead_id} — джерело 'Реактивация', "
                 f"звільняємо достроково (ранок у клієнта ще не настав)"
@@ -906,8 +920,10 @@ async def _release_held_leads():
 
         try:
             await q(
-                "INSERT OR IGNORE INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
-                (lead_id, 'queued', datetime.now().timestamp(), row['title']),
+                "INSERT OR IGNORE INTO leads (lead_id, status, created_at, title, phone, timezone, is_reactivation) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (lead_id, 'queued', datetime.now().timestamp(), row['title'],
+                 row['phone'], row['timezone'], int(is_reactivation)),
             )
         except Exception as e:
             logger.error(f"_release_held_leads: не вдалось записати заявку {lead_id}: {e}")
@@ -934,6 +950,7 @@ async def _run_minute_checks():
     await _check_schedules()
     await _check_status_broadcast()
     await _release_held_leads()
+    await resweep_active_leads_for_client_time()
 
 
 async def _run_daily_reset():
@@ -976,19 +993,6 @@ def build_scheduler() -> AsyncIOScheduler:
         _scheduler_job('stale_cleanup', cleanup_stale_messages),
         IntervalTrigger(seconds=300, timezone=_TZ),
         id='stale_cleanup', max_instances=1,
-    )
-    # Автоматична заміна ручної кнопки "🌙 Звірити ранкові ліди": о 00:00 за
-    # Києвом (українські номери) і о 00:00 за Нью-Йорком (іноземні — див.
-    # докстрінг resweep_active_leads_for_client_time()).
-    scheduler.add_job(
-        _scheduler_job('resweep_morning_ua', resweep_active_leads_for_client_time),
-        CronTrigger(hour=0, minute=0, timezone=_TZ),
-        id='resweep_morning_ua', max_instances=1,
-    )
-    scheduler.add_job(
-        _scheduler_job('resweep_morning_ny', resweep_active_leads_for_client_time),
-        CronTrigger(hour=0, minute=0, timezone=_NY_TZ),
-        id='resweep_morning_ny', max_instances=1,
     )
     return scheduler
 

@@ -78,6 +78,14 @@ async def test_on_lead_undistributed_keeps_manager_out_if_manual_exit(temp_db, m
 
 async def test_handle_lead_event_inserts_new_hot_lead(temp_db, monkeypatch):
     monkeypatch.setattr(webhook, 'assign_next', AsyncMock())
+    # Ізолюємось від Kommo (без цього тест реально стукається у справжній API
+    # через .env-токен) і від поточного часу доби (без цього фолбек-пояс
+    # America/New_York міг вважатись "ще не ранком" уночі/рано-вранці за NY,
+    # і лід замість прямо в чергу пішов би в held_leads — тест мав би
+    # перевіряти саме "ранковий" сценарій окремо, а не залежати від нього тут).
+    monkeypatch.setattr(webhook, 'get_lead_info', AsyncMock(return_value=None))
+    monkeypatch.setattr(webhook, 'get_lead_phone', AsyncMock(return_value=None))
+    monkeypatch.setattr(webhook, 'is_client_morning', lambda tz_name: True)
 
     event = {
         'lead_id':     '424242',

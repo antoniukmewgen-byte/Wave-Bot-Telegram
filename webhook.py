@@ -54,9 +54,15 @@ def _insert_lead_after_attempt(retry_state):
     after=_insert_lead_after_attempt,
     reraise=True,
 )
-async def _insert_lead_with_retry(lead_id: str, created_ts: float, title: str):
-    await q("INSERT INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",
-      (lead_id, 'queued', created_ts, title))
+async def _insert_lead_with_retry(
+    lead_id: str, created_ts: float, title: str,
+    phone: str = None, tz_name: str = None, is_reactivation: bool = False,
+):
+    await q(
+        "INSERT INTO leads (lead_id, status, created_at, title, phone, timezone, is_reactivation) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (lead_id, 'queued', created_ts, title, phone, tz_name, int(is_reactivation)),
+    )
 
 
 def _extract_lead_events(data) -> list[dict]:
@@ -274,7 +280,11 @@ async def _handle_lead_event(event: dict):
     # звернення клієнта, а стара угода, яку повернули в роботу. Її НЕ тримаємо
     # до ранку — заявка йде одразу в чергу, як і до появи цієї фічі.
     info = await get_lead_info(lead_id)
-    if info and is_lead_reactivation(info):
+    is_reactivation = bool(info and is_lead_reactivation(info))
+    phone   = None
+    tz_name = None
+
+    if is_reactivation:
         logger.info(f"Webhook: заявка {lead_id} — джерело 'Реактивация', ранкову перевірку пропускаємо")
     else:
         try:
@@ -297,9 +307,11 @@ async def _handle_lead_event(event: dict):
                 await notify_admin_error(f"webhook (held_leads запис заявки #{lead_id})", e)
             return
 
-    # Retry INSERT up to 3 times — a transient DB lock must not silently drop a lead
+    # Retry INSERT up to 3 times — a transient DB lock must not silently drop a lead.
+    # phone/tz_name/is_reactivation кешуємо тут же — щоб resweep_active_leads_for_client_time()
+    # потім не мусив заново дергати Kommo для тієї ж інформації.
     try:
-        await _insert_lead_with_retry(lead_id, datetime.now().timestamp(), title)
+        await _insert_lead_with_retry(lead_id, datetime.now().timestamp(), title, phone, tz_name, is_reactivation)
     except Exception as e:
         logger.error(f"Webhook: не вдалось записати заявку {lead_id} після 3 спроб: {e}")
         await notify_admin_error(f"webhook (запис заявки #{lead_id} в БД, 3 спроби)", e)

@@ -118,6 +118,13 @@ async def _migrate():
         "ALTER TABLE schedules ADD COLUMN end_time TEXT NOT NULL DEFAULT '23:00'",
         "ALTER TABLE messages ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE distributed_leads ADD COLUMN kept_in_queue INTEGER NOT NULL DEFAULT 0",
+        # Кеш телефону/поясу/джерела "Реактивация", порахованих один раз при
+        # створенні заявки (webhook.py) чи звільненні з held_leads
+        # (_release_held_leads) — щоб resweep_active_leads_for_client_time()
+        # більше не мусив щоразу дергати Kommo API для кожної активної заявки.
+        "ALTER TABLE leads ADD COLUMN phone TEXT",
+        "ALTER TABLE leads ADD COLUMN timezone TEXT",
+        "ALTER TABLE leads ADD COLUMN is_reactivation INTEGER NOT NULL DEFAULT 0",
     ]
     for sql in migrations:
         try:
