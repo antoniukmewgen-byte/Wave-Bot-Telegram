@@ -105,6 +105,23 @@ async def test_handle_lead_event_inserts_new_hot_lead(temp_db, monkeypatch):
     webhook.assign_next.assert_awaited_once_with('424242')
 
 
+async def test_release_held_leads_preserves_original_created_at(temp_db, monkeypatch):
+    orig_ts = datetime.now().timestamp() - 2 * 24 * 3600  # заявка "прийшла" позавчора
+    await temp_db.add_held_lead('L4', 'Заявка L4', '+380501234567', 'Europe/Kyiv', orig_ts)
+
+    monkeypatch.setattr(queue_logic, 'is_client_morning', lambda tz_name: True)
+    monkeypatch.setattr(queue_logic, 'assign_next', AsyncMock())
+    monkeypatch.setattr('kommo.lead_confirmed_missing', AsyncMock(return_value=False))
+    monkeypatch.setattr(state, '_app', _fake_app())
+
+    await queue_logic._release_held_leads()
+
+    lead = await temp_db.get_lead('L4')
+    assert lead is not None
+    assert lead['created_at'] == orig_ts
+    assert await temp_db.get_held_lead('L4') is None
+
+
 async def test_tick_assigns_stale_queued_lead_smoke(temp_db, monkeypatch):
     await temp_db.q(
         "INSERT INTO leads (lead_id, status, created_at, title) VALUES (?,?,?,?)",

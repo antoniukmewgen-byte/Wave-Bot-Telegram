@@ -270,6 +270,7 @@ async def _handle_lead_event(event: dict):
         return
 
     title = make_lead_title(status_id, lead_id)
+    created_ts = datetime.now().timestamp()
 
     # ── "Ранкові" ліди: не видаємо менеджеру, поки клієнту не настало 9:00 ──
     # за його місцевим часом (визначається за телефоном контакта/компанії).
@@ -297,7 +298,7 @@ async def _handle_lead_event(event: dict):
 
         if not is_client_morning(tz_name):
             try:
-                await add_held_lead(lead_id, title, phone, tz_name)
+                await add_held_lead(lead_id, title, phone, tz_name, created_ts)
                 logger.info(
                     f"Webhook: заявка {lead_id} — у клієнта ще не 9:00 ({tz_name}), "
                     f"тримаємо в held_leads"
@@ -311,7 +312,7 @@ async def _handle_lead_event(event: dict):
     # phone/tz_name/is_reactivation кешуємо тут же — щоб resweep_active_leads_for_client_time()
     # потім не мусив заново дергати Kommo для тієї ж інформації.
     try:
-        await _insert_lead_with_retry(lead_id, datetime.now().timestamp(), title, phone, tz_name, is_reactivation)
+        await _insert_lead_with_retry(lead_id, created_ts, title, phone, tz_name, is_reactivation)
     except Exception as e:
         logger.error(f"Webhook: не вдалось записати заявку {lead_id} після 3 спроб: {e}")
         await notify_admin_error(f"webhook (запис заявки #{lead_id} в БД, 3 спроби)", e)

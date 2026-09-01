@@ -98,11 +98,12 @@ async def _create_tables():
             added_at   REAL
         );
         CREATE TABLE IF NOT EXISTS held_leads (
-            lead_id    TEXT PRIMARY KEY,
-            title      TEXT,
-            phone      TEXT,
-            timezone   TEXT NOT NULL,
-            created_at REAL NOT NULL
+            lead_id         TEXT PRIMARY KEY,
+            title           TEXT,
+            phone           TEXT,
+            timezone        TEXT NOT NULL,
+            created_at      REAL NOT NULL,
+            orig_created_at REAL
         );
     """)
     await _conn.commit()
@@ -125,6 +126,10 @@ async def _migrate():
         "ALTER TABLE leads ADD COLUMN phone TEXT",
         "ALTER TABLE leads ADD COLUMN timezone TEXT",
         "ALTER TABLE leads ADD COLUMN is_reactivation INTEGER NOT NULL DEFAULT 0",
+        # Справжній час появи заявки в боті (не момент заморозки в held_leads) —
+        # щоб _release_held_leads() при звільненні ставив у leads.created_at
+        # оригінальний час, а не "зараз", і заявка не виглядала фальшиво свіжою.
+        "ALTER TABLE held_leads ADD COLUMN orig_created_at REAL",
     ]
     for sql in migrations:
         try:
@@ -521,14 +526,18 @@ async def get_all_distributed_leads() -> list[dict]:
 
 # ─── ЗАЯВКИ НА УТРИМАННІ (до 9:00 за часом клієнта) ─────────────────────────
 
-async def add_held_lead(lead_id: str, title: str, phone: Optional[str], timezone: str):
+async def add_held_lead(lead_id: str, title: str, phone: Optional[str], timezone: str, orig_created_at: float):
     """
     Фіксує заявку, яку Kommo вже прислав, але клієнту в його часовому поясі
     ще не настало 9:00 — тому менеджеру її поки не показуємо (див. webhook.py).
+    orig_created_at — справжній час появи заявки в боті (момент вебхука чи
+    її оригінальний created_at у leads, якщо заморожується вже активна
+    заявка) — зберігається окремо від created_at (момент заморозки), щоб
+    після звільнення заявка не виглядала "щойно надійшла".
     """
-    await q("""INSERT OR REPLACE INTO held_leads (lead_id, title, phone, timezone, created_at)
-         VALUES (?,?,?,?,?)""",
-      (lead_id, title, phone, timezone, datetime.now().timestamp()))
+    await q("""INSERT OR REPLACE INTO held_leads (lead_id, title, phone, timezone, created_at, orig_created_at)
+         VALUES (?,?,?,?,?,?)""",
+      (lead_id, title, phone, timezone, datetime.now().timestamp(), orig_created_at))
 
 
 async def get_held_lead(lead_id: str) -> Optional[dict]:

@@ -789,7 +789,7 @@ async def resweep_active_leads_for_client_time() -> dict:
     from kommo import get_lead_phone, get_lead_info, is_lead_reactivation
 
     rows = await q(
-        "SELECT lead_id, title, phone, timezone, is_reactivation FROM leads "
+        "SELECT lead_id, title, phone, timezone, is_reactivation, created_at FROM leads "
         "WHERE status NOT IN ('taken','duplicate','closed')",
         fetch='all',
     )
@@ -835,7 +835,7 @@ async def resweep_active_leads_for_client_time() -> dict:
             continue
 
         try:
-            await add_held_lead(lead_id, title, phone, tz_name)
+            await add_held_lead(lead_id, title, phone, tz_name, row['created_at'])
         except Exception as e:
             logger.error(f"resweep_active_leads_for_client_time: held_leads запис {lead_id}: {e}")
             continue
@@ -918,11 +918,17 @@ async def _release_held_leads():
                 )
                 continue
 
+        # Оригінальний час появи заявки (не момент звільнення з held_leads) —
+        # інакше давно заморожена заявка виглядала б у черзі "щойно надійшла"
+        # і випереджала б справді нові. Для рядків, застряглих у held_leads
+        # ще до цієї міграції (orig_created_at відсутній) — фолбек на created_at.
+        orig_created_at = row['orig_created_at'] if row['orig_created_at'] is not None else row['created_at']
+
         try:
             await q(
                 "INSERT OR IGNORE INTO leads (lead_id, status, created_at, title, phone, timezone, is_reactivation) "
                 "VALUES (?,?,?,?,?,?,?)",
-                (lead_id, 'queued', datetime.now().timestamp(), row['title'],
+                (lead_id, 'queued', orig_created_at, row['title'],
                  row['phone'], row['timezone'], int(is_reactivation)),
             )
         except Exception as e:
