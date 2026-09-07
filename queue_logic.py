@@ -516,7 +516,7 @@ async def _send_next_queued_broadcast(**tick_ctx):
 
     orig_manager = waiting['manager_id']
     skipped      = await get_skipped(waiting['lead_id'])
-    text         = f"{waiting['title']}\n👤 <i>Відкрита черга</i>"
+    text         = _escalation_text(waiting)
     kb           = build_broadcast_keyboard(waiting['lead_id'])
     exclude      = list(set(skipped + ([orig_manager] if orig_manager else [])))
     queue        = await sorted_queue(exclude=exclude, **tick_ctx)
@@ -789,7 +789,8 @@ async def resweep_active_leads_for_client_time() -> dict:
     from kommo import get_lead_phone, get_lead_info, is_lead_reactivation
 
     rows = await q(
-        "SELECT lead_id, title, phone, timezone, is_reactivation, created_at FROM leads "
+        "SELECT lead_id, title, phone, timezone, is_reactivation, created_at, status, esc_level, "
+        "manager_id, sent_at, last_rebroadcast_at FROM leads "
         "WHERE status NOT IN ('taken','duplicate','closed')",
         fetch='all',
     )
@@ -835,7 +836,10 @@ async def resweep_active_leads_for_client_time() -> dict:
             continue
 
         try:
-            await add_held_lead(lead_id, title, phone, tz_name, row['created_at'])
+            await add_held_lead(lead_id, title, phone, tz_name, row['created_at'],
+                                 orig_status=row['status'], esc_level=row['esc_level'],
+                                 orig_manager_id=row['manager_id'], orig_sent_at=row['sent_at'],
+                                 orig_last_rebroadcast_at=row['last_rebroadcast_at'])
         except Exception as e:
             logger.error(f"resweep_active_leads_for_client_time: held_leads запис {lead_id}: {e}")
             continue
@@ -924,12 +928,51 @@ async def _release_held_leads():
         # ще до цієї міграції (orig_created_at відсутній) — фолбек на created_at.
         orig_created_at = row['orig_created_at'] if row['orig_created_at'] is not None else row['created_at']
 
+        # Відновлюємо стан ескалації, з яким заявку заморозила
+        # resweep_active_leads_for_client_time() (щойно активну заявку в
+        # broadcast із esc_level 1-3 знято до ранку) — інакше після
+        # звільнення вона мовчки скидалась би в 'queued'/esc_level=0, наче
+        # ескалації взагалі не було. Для решти статусів (queued/no_managers/
+        # sent — там esc_level завжди 0) і для нових лідів з webhook.py
+        # (orig_status відсутній) поведінка лишається як була — 'queued'.
+        if row.get('orig_status') == 'broadcast':
+            new_status              = 'broadcast'
+            new_esc_level           = row['esc_level'] or 1
+            new_manager_id          = row.get('orig_manager_id')
+            new_last_rebroadcast_at = row.get('orig_last_rebroadcast_at')
+
+            # sent_at відновлюємо "живим" (годинник очікування НЕ ставиться на
+            # паузу під час hold — заявка справді довго висить без відповіді),
+            # АЛЕ тільки якщо просто зараз немає іншої активної broadcast-
+            # заявки. Інакше порушили б інваріант "лише одна active broadcast
+            # одночасно" (той самий захист, що й у broadcast_to_all() для
+            # нових ескалацій) і завалили б менеджерів двома картками разом —
+            # у такому разі заявка йде в звичайну чергу очікування (sent_at=NULL,
+            # підхопить _send_next_queued_broadcast()), як і раніше.
+            new_sent_at = row.get('orig_sent_at')
+            if new_sent_at is not None:
+                active_broadcast = await q(
+                    "SELECT 1 FROM leads WHERE status='broadcast' AND sent_at IS NOT NULL LIMIT 1",
+                    fetch='one',
+                )
+                if active_broadcast:
+                    new_sent_at = None
+        else:
+            new_status              = 'queued'
+            new_esc_level           = 0
+            new_manager_id          = None
+            new_sent_at             = None
+            new_last_rebroadcast_at = None
+
         try:
             await q(
-                "INSERT OR IGNORE INTO leads (lead_id, status, created_at, title, phone, timezone, is_reactivation) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (lead_id, 'queued', orig_created_at, row['title'],
-                 row['phone'], row['timezone'], int(is_reactivation)),
+                "INSERT OR IGNORE INTO leads "
+                "(lead_id, status, created_at, title, phone, timezone, is_reactivation, esc_level, "
+                "manager_id, sent_at, last_rebroadcast_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (lead_id, new_status, orig_created_at, row['title'],
+                 row['phone'], row['timezone'], int(is_reactivation), new_esc_level,
+                 new_manager_id, new_sent_at, new_last_rebroadcast_at),
             )
         except Exception as e:
             logger.error(f"_release_held_leads: не вдалось записати заявку {lead_id}: {e}")
@@ -937,7 +980,26 @@ async def _release_held_leads():
             continue
         await remove_held_lead(lead_id)
         logger.info(f"_release_held_leads: заявка {lead_id} — у клієнта настало 9:00 ({row['timezone']}), видаємо")
-        asyncio.create_task(assign_next(lead_id))
+
+        if new_status == 'broadcast':
+            if new_sent_at is not None:
+                # Уже "жива" (sent_at не NULL) — найближчий _tick() сам порахує
+                # age від старого sent_at і одразу продовжить ескалацію з того
+                # рівня, де її перервали (escalate_warn/escalate_sos/rebroadcast_periodic).
+                logger.info(
+                    f"_release_held_leads: заявка {lead_id} відновлена як активний broadcast "
+                    f"(esc_level={new_esc_level}), ескалація продовжиться на найближчому тіку"
+                )
+            else:
+                # sent_at=NULL — найближчий _tick() підхопить її як "заявку,
+                # що чекає своєї черги" через _send_next_queued_broadcast()
+                # і розішле з правильним ескалаційним текстом (_escalation_text).
+                logger.info(
+                    f"_release_held_leads: заявка {lead_id} відновлена в чергу broadcast "
+                    f"(esc_level={new_esc_level}), чекає своєї черги розсилки"
+                )
+        else:
+            asyncio.create_task(assign_next(lead_id))
 
 
 def _scheduler_job(name: str, fn):

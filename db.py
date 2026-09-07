@@ -98,12 +98,17 @@ async def _create_tables():
             added_at   REAL
         );
         CREATE TABLE IF NOT EXISTS held_leads (
-            lead_id         TEXT PRIMARY KEY,
-            title           TEXT,
-            phone           TEXT,
-            timezone        TEXT NOT NULL,
-            created_at      REAL NOT NULL,
-            orig_created_at REAL
+            lead_id             TEXT PRIMARY KEY,
+            title               TEXT,
+            phone               TEXT,
+            timezone            TEXT NOT NULL,
+            created_at          REAL NOT NULL,
+            orig_created_at     REAL,
+            orig_status         TEXT,
+            esc_level           INTEGER DEFAULT 0,
+            orig_manager_id     TEXT,
+            orig_sent_at        REAL,
+            orig_last_rebroadcast_at REAL
         );
     """)
     await _conn.commit()
@@ -130,6 +135,18 @@ async def _migrate():
         # щоб _release_held_leads() при звільненні ставив у leads.created_at
         # оригінальний час, а не "зараз", і заявка не виглядала фальшиво свіжою.
         "ALTER TABLE held_leads ADD COLUMN orig_created_at REAL",
+        # Стан заявки (status/esc_level) на момент заморозки — щоб
+        # _release_held_leads() міг відновити ескалацію (broadcast + esc_level),
+        # а не завжди повертати заявку як щойно створену (esc_level=0, queued).
+        "ALTER TABLE held_leads ADD COLUMN orig_status TEXT",
+        "ALTER TABLE held_leads ADD COLUMN esc_level INTEGER DEFAULT 0",
+        # Решта стану активної broadcast-заявки на момент заморозки —
+        # оригінальний менеджер (пріоритетний отримувач розсилки), реальний
+        # sent_at (щоб годинник очікування не ставився на паузу під час hold)
+        # і last_rebroadcast_at (темп періодичних SOS-нагадувань для esc_level=3).
+        "ALTER TABLE held_leads ADD COLUMN orig_manager_id TEXT",
+        "ALTER TABLE held_leads ADD COLUMN orig_sent_at REAL",
+        "ALTER TABLE held_leads ADD COLUMN orig_last_rebroadcast_at REAL",
     ]
     for sql in migrations:
         try:
@@ -526,7 +543,10 @@ async def get_all_distributed_leads() -> list[dict]:
 
 # ─── ЗАЯВКИ НА УТРИМАННІ (до 9:00 за часом клієнта) ─────────────────────────
 
-async def add_held_lead(lead_id: str, title: str, phone: Optional[str], timezone: str, orig_created_at: float):
+async def add_held_lead(lead_id: str, title: str, phone: Optional[str], timezone: str, orig_created_at: float,
+                         orig_status: Optional[str] = None, esc_level: int = 0,
+                         orig_manager_id: Optional[str] = None, orig_sent_at: Optional[float] = None,
+                         orig_last_rebroadcast_at: Optional[float] = None):
     """
     Фіксує заявку, яку Kommo вже прислав, але клієнту в його часовому поясі
     ще не настало 9:00 — тому менеджеру її поки не показуємо (див. webhook.py).
@@ -534,10 +554,18 @@ async def add_held_lead(lead_id: str, title: str, phone: Optional[str], timezone
     її оригінальний created_at у leads, якщо заморожується вже активна
     заявка) — зберігається окремо від created_at (момент заморозки), щоб
     після звільнення заявка не виглядала "щойно надійшла".
+    orig_status/esc_level/orig_manager_id/orig_sent_at/orig_last_rebroadcast_at — весь стан
+    ескалації заявки на момент заморозки (тільки для вже активних заявок, які
+    знімає resweep_active_leads_for_client_time; для нових лідів з webhook.py
+    лишаються дефолтними — там ще немає стану) — щоб _release_held_leads() міг
+    повністю відновити broadcast-ескалацію, а не губити її.
     """
-    await q("""INSERT OR REPLACE INTO held_leads (lead_id, title, phone, timezone, created_at, orig_created_at)
-         VALUES (?,?,?,?,?,?)""",
-      (lead_id, title, phone, timezone, datetime.now().timestamp(), orig_created_at))
+    await q("""INSERT OR REPLACE INTO held_leads
+         (lead_id, title, phone, timezone, created_at, orig_created_at, orig_status, esc_level,
+          orig_manager_id, orig_sent_at, orig_last_rebroadcast_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+      (lead_id, title, phone, timezone, datetime.now().timestamp(), orig_created_at, orig_status, esc_level,
+       orig_manager_id, orig_sent_at, orig_last_rebroadcast_at))
 
 
 async def get_held_lead(lead_id: str) -> Optional[dict]:
