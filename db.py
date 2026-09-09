@@ -147,6 +147,12 @@ async def _migrate():
         "ALTER TABLE held_leads ADD COLUMN orig_manager_id TEXT",
         "ALTER TABLE held_leads ADD COLUMN orig_sent_at REAL",
         "ALTER TABLE held_leads ADD COLUMN orig_last_rebroadcast_at REAL",
+        # Ручний "форс" в чергу для менеджера, якого виключив fetch_managers()
+        # (погана конверсія/немає плану/забагато лідів без оплат) — окрема від
+        # max_leads колонка, щоб не плутатись зі звичайним ручним лімітом і не
+        # скидати його по виходу з черги (форс скидається, звичайний ліміт — ні).
+        "ALTER TABLE availability ADD COLUMN forced INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE availability ADD COLUMN forced_max_leads INTEGER",
     ]
     for sql in migrations:
         try:
@@ -209,6 +215,25 @@ async def set_max_leads_override(manager_id: str, max_leads):
 async def reset_all_limit_overrides():
     """Скидає всі ручні ліміти о опівночі."""
     await q("UPDATE availability SET max_leads=NULL WHERE max_leads IS NOT NULL")
+
+
+async def get_all_forced() -> dict:
+    """Повертає {manager_id: max_leads} для менеджерів, форсованих у чергу
+    попри те, що fetch_managers() їх виключив. max_leads=None означає без ліміту."""
+    rows = await q("SELECT manager_id, forced_max_leads FROM availability WHERE forced=1", fetch='all')
+    return {r['manager_id']: r['forced_max_leads'] for r in rows} if rows else {}
+
+
+async def set_forced(manager_id: str, max_leads: Optional[int]):
+    """Форсує менеджера в чергу з вказаним лімітом (None = без ліміту)."""
+    await q("""INSERT INTO availability (manager_id, is_active, forced, forced_max_leads) VALUES (?, 1, 1, ?)
+         ON CONFLICT(manager_id) DO UPDATE SET forced=1, forced_max_leads=?""",
+      (manager_id, max_leads, max_leads))
+
+
+async def clear_forced(manager_id: str):
+    """Знімає форс (при виході з черги — вручну або по кінцю зміни)."""
+    await q("UPDATE availability SET forced=0, forced_max_leads=NULL WHERE manager_id=?", (manager_id,))
 
 
 async def inc_taken(manager_id: str, month: str):

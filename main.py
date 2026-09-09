@@ -26,6 +26,8 @@ from handlers.conversations import (
     schedules_start, schedules_select, schedules_days, schedules_time, schedules_end_time, schedules_cancel,
     REG_SELECT_SHEET, REG_SELECT_KOMMO,
     reg_start, reg_select_sheet, reg_select_kommo,
+    FORCE_SELECT, FORCE_INPUT,
+    force_start, force_select, force_input, force_cancel,
 )
 from handlers.admin_callbacks import on_admin_callback
 
@@ -104,6 +106,20 @@ async def lifespan(fastapi: FastAPI):
         allow_reentry=True,
         persistent=True,
         name='schedules_conversation',
+    ))
+
+    _force_entry = MessageHandler(filters.TEXT & filters.Regex(r'^🔓 Заблоковані$'), force_start)
+    app.add_handler(ConversationHandler(
+        entry_points=[_force_entry],
+        states={
+            FORCE_SELECT: [CallbackQueryHandler(force_select, pattern=r'^forceq:'), _force_entry],
+            FORCE_INPUT:  [_force_entry, MessageHandler(filters.TEXT & ~filters.COMMAND, force_input)],
+        },
+        fallbacks=[CommandHandler('cancel', force_cancel)],
+        per_user=True,
+        allow_reentry=True,
+        persistent=True,
+        name='force_conversation',
     ))
 
     app.add_handler(CallbackQueryHandler(

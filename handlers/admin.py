@@ -8,7 +8,7 @@ from telegram.ext import ContextTypes
 import state
 from config import ADMIN_IDS, AMO_PIPELINE_ID, AMO_HOT_STATUS_ID, WEBHOOK_PATH, AMO_TOKEN
 from db import (
-    q, get_all_taken, get_all_availability, get_all_max_leads_overrides,
+    q, get_all_taken, get_all_availability, get_all_max_leads_overrides, get_all_forced,
     get_all_exit_reasons, get_connected, get_managers_dict, get_all_managers,
     get_pending_managers, approve_manager, delete_manager,
     add_status_chat, remove_status_chat,
@@ -17,7 +17,7 @@ from kommo import sync_from_kommo
 from notifications import send_long, notify_admin_error
 from queue_logic import (
     day_key, _build_sent_map, cleanup_orphaned_manager_messages, build_manager_status_text,
-    reconcile_distributed_leads, resweep_active_leads_for_client_time,
+    reconcile_distributed_leads, resweep_active_leads_for_client_time, resolve_max_leads,
 )
 from sheets import fetch_managers_async
 
@@ -32,6 +32,7 @@ ADMIN_KB = ReplyKeyboardMarkup(
         [KeyboardButton("⏰ Розклади"),           KeyboardButton("🔍 Діагностика")],
         [KeyboardButton("👤 Менеджери"),          KeyboardButton("🧹 Прибрати привиди")],
         [KeyboardButton("📡 Перевірити на зв'язку"), KeyboardButton("🌙 Звірити ранкові ліди")],
+        [KeyboardButton("🔓 Заблоковані")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -105,7 +106,10 @@ async def _handle_active_leads(message, managers: dict):
     for lead in rows:
         age_min    = int((datetime.now().timestamp() - lead['created_at']) / 60)
         status_str = status_map.get(lead['status'], lead['status'])
-        mgr        = '—' if lead['status'] == 'broadcast' else managers.get(lead['manager_id'] or '', {}).get('name', '—')
+        mgr_id     = lead['manager_id'] or ''
+        mgr        = '—' if lead['status'] == 'broadcast' else (
+            managers.get(mgr_id, {}).get('name') or state.MANAGERS_BY_ID.get(mgr_id, '—')
+        )
         lines.append(
             f"{lead['title']}\n"
             f"{status_str}\n"
@@ -235,13 +239,14 @@ async def _handle_queue(message, managers: dict):
     overrides = await get_all_max_leads_overrides()
     taken_map = await get_all_taken(month)
     sent_map  = await _build_sent_map()
+    forced    = await get_all_forced()
 
     active = []
-    for tg_id, info in managers.items():
+    for tg_id in set(managers) | set(forced):
         if not avail_map.get(tg_id, False):
             continue
         taken     = taken_map.get(tg_id, 0)
-        max_leads = overrides[tg_id] if tg_id in overrides else info['max_leads']
+        max_leads = resolve_max_leads(tg_id, managers, overrides, forced)
         if max_leads is not None and taken >= max_leads:
             continue
         active.append((taken, tg_id))
@@ -254,14 +259,15 @@ async def _handle_queue(message, managers: dict):
     lines = ["📊 <b>Поточна черга:</b>\n"]
     for i, (taken, tg_id) in enumerate(active, 1):
         info      = managers.get(tg_id, {})
-        name      = info.get('name', tg_id)
-        max_leads = overrides[tg_id] if tg_id in overrides else info.get('max_leads')
+        name      = info.get('name') or state.MANAGERS_BY_ID.get(tg_id, tg_id)
+        max_leads = resolve_max_leads(tg_id, managers, overrides, forced)
         limit_str = '∞' if max_leads is None else str(max_leads)
         pending   = sent_map.get(tg_id, 0) > 0
         mark      = " 📨" if pending else ""
-        lines.append(f"{i}. {name} — взяв: {taken}/{limit_str}{mark}")
+        forced_mark = " 🔓" if tg_id in forced else ""
+        lines.append(f"{i}. {name}{forced_mark} — взяв: {taken}/{limit_str}{mark}")
 
-    lines.append("\n<i>📨 — очікує відповіді на поточну заявку</i>")
+    lines.append("\n<i>📨 — очікує відповіді на поточну заявку | 🔓 — форсовано в чергу</i>")
     await send_long(message, '\n'.join(lines))
 
 
@@ -304,6 +310,7 @@ async def _handle_diagnostics(message):
     taken_map    = await get_all_taken(day_key())
     sent_map     = await _build_sent_map()
     exit_reasons = await get_all_exit_reasons()
+    forced       = await get_all_forced()
 
     try:
         managers  = await fetch_managers_async()
@@ -316,12 +323,18 @@ async def _handle_diagnostics(message):
     for name, tg_id in (await get_managers_dict()).items():
         active    = avail_map.get(tg_id, False)
         in_sheet  = tg_id in managers
+        is_forced = tg_id in forced
         taken     = taken_map.get(tg_id, 0)
         pending   = sent_map.get(tg_id, 0)
-        max_l     = overrides.get(tg_id) or (managers.get(tg_id, {}).get('max_leads') if in_sheet else '?')
+        max_l     = resolve_max_leads(tg_id, managers, overrides, forced) if (in_sheet or is_forced) else '?'
         limit_str = '∞' if max_l is None else str(max_l)
         reason    = exit_reasons.get(tg_id, '')
-        sheet_mark   = f"✅ таблиця | ліміт={limit_str} | взяв={taken}" if in_sheet else "❌ нема в таблиці"
+        if in_sheet:
+            sheet_mark = f"✅ таблиця | ліміт={limit_str} | взяв={taken}"
+        elif is_forced:
+            sheet_mark = f"🔓 форсовано | ліміт={limit_str} | взяв={taken}"
+        else:
+            sheet_mark = "❌ нема в таблиці"
         status_icon  = "🟢" if active else "🔴"
         pending_str  = " | 📨 чекає" if pending else ""
         reason_str   = f" ({reason})" if reason and not active else ""

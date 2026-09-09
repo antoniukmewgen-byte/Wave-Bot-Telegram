@@ -9,9 +9,10 @@ from config import ADMIN_IDS
 from db import (
     get_all_max_leads_overrides, get_all_schedules, set_max_leads_override, set_schedule,
     get_managers_dict, upsert_manager, get_manager, get_all_managers,
+    get_all_forced, set_forced, clear_forced, set_availability,
 )
 from notifications import safe_answer
-from sheets import fetch_managers_async, get_all_sheet_names
+from sheets import fetch_managers_async, get_all_sheet_names, get_block_reason
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,8 @@ LIMIT_SELECT, LIMIT_INPUT = range(2)
 SCHED_SELECT, SCHED_DAYS, SCHED_TIME, SCHED_END_TIME = range(4)
 
 REG_SELECT_SHEET, REG_SELECT_KOMMO = range(2)
+
+FORCE_SELECT, FORCE_INPUT = range(2)
 
 DAYS_UA = {0: 'Пн', 1: 'Вт', 2: 'Ср', 3: 'Чт', 4: 'Пт', 5: 'Сб', 6: 'Нд'}
 
@@ -121,6 +124,116 @@ async def limits_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def limits_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    from handlers.admin import ADMIN_KB
+    await update.message.reply_text("❌ Скасовано", reply_markup=ADMIN_KB)
+    return ConversationHandler.END
+
+
+# ─── CONVERSATION: ЗАБЛОКОВАНІ (ручний форс у чергу) ─────────────────────────
+
+async def force_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ У вас немає доступу до цієї функції.")
+        return ConversationHandler.END
+
+    managers = await fetch_managers_async()
+    forced   = await get_all_forced()
+
+    buttons = []
+    for name, tg_id in sorted((await get_managers_dict()).items(), key=lambda x: x[0]):
+        if tg_id in forced:
+            limit = forced[tg_id]
+            lim_str = '∞' if limit is None else str(limit)
+            buttons.append([InlineKeyboardButton(
+                f"🔓 {name} — форсовано ({lim_str})", callback_data=f"forceq:{tg_id}"
+            )])
+        elif tg_id not in managers:
+            reason = await get_block_reason(tg_id) or "заблоковано"
+            buttons.append([InlineKeyboardButton(
+                f"⛔ {name} — {reason}", callback_data=f"forceq:{tg_id}"
+            )])
+
+    if not buttons:
+        await update.message.reply_text("✅ Немає заблокованих менеджерів — всі проходять у чергу.")
+        return ConversationHandler.END
+
+    buttons.append([InlineKeyboardButton("❌ Скасувати", callback_data="forceq:cancel")])
+    await update.message.reply_text(
+        "🔓 <b>Заблоковані менеджери</b>\n"
+        "Оберіть менеджера, щоб форсувати в чергу (або зняти форс):\n\n"
+        "<i>⛔ = виключений ботом | 🔓 = форсовано вручну (натисніть, щоб зняти)</i>",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+    return FORCE_SELECT
+
+
+async def force_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await safe_answer(query)
+
+    if query.data == "forceq:cancel":
+        await query.edit_message_text("❌ Скасовано")
+        return ConversationHandler.END
+
+    tg_id = query.data.split(':', 1)[1]
+    name  = state.MANAGERS_BY_ID.get(tg_id, tg_id)
+
+    forced = await get_all_forced()
+    if tg_id in forced:
+        await clear_forced(tg_id)
+        await query.edit_message_text(f"🔒 Форс знято для <b>{name}</b>", parse_mode='HTML')
+        return ConversationHandler.END
+
+    context.user_data['force_tg_id'] = tg_id
+    context.user_data['force_name']  = name
+
+    await query.edit_message_text(
+        f"🔓 Менеджер: <b>{name}</b>\n\n"
+        f"Введіть ліміт лідів на день для форсованого менеджера:\n"
+        f"• число (напр. <code>5</code>) — встановити ліміт\n"
+        f"• <code>0</code> — без ліміту\n"
+        f"• /cancel — скасувати",
+        parse_mode='HTML',
+    )
+    return FORCE_INPUT
+
+
+async def force_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ У вас немає доступу до цієї функції.")
+        return ConversationHandler.END
+
+    text = update.message.text.strip()
+    if not text.isdigit():
+        await update.message.reply_text("⚠️ Введіть ціле число або 0 для необмеженого ліміту")
+        return FORCE_INPUT
+
+    value     = int(text)
+    tg_id     = context.user_data.get('force_tg_id')
+    name      = context.user_data.get('force_name', tg_id)
+    max_leads = None if value == 0 else value
+
+    await set_forced(tg_id, max_leads)
+    await set_availability(tg_id, True, reason=None)
+    context.user_data.clear()
+
+    from handlers.admin import ADMIN_KB
+    lim_str = "∞ (без ліміту)" if max_leads is None else str(max_leads)
+    await update.message.reply_text(
+        f"✅ <b>{name}</b> форсовано в чергу з лімітом: <b>{lim_str}</b>\n"
+        f"<i>Форс діє до кінця зміни менеджера.</i>",
+        parse_mode='HTML',
+        reply_markup=ADMIN_KB,
+    )
+    logger.info(f"Force queue: {name} ({tg_id}) → max_leads={max_leads}")
+    return ConversationHandler.END
+
+
+async def force_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     from handlers.admin import ADMIN_KB
     await update.message.reply_text("❌ Скасовано", reply_markup=ADMIN_KB)

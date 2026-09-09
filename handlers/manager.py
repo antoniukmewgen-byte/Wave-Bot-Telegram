@@ -8,14 +8,14 @@ from telegram.ext import ContextTypes
 import state
 from config import ADMIN_IDS, AMO_SUBDOMAIN
 from db import (
-    q, get_lead, get_taken, get_all_max_leads_overrides,
+    q, get_lead, get_taken, get_all_max_leads_overrides, get_all_forced,
     is_available, set_availability, mark_connected, mark_skipped, get_skipped, take_lead,
     get_last_connected_ts, get_manager, get_manager_distributed_leads, add_distributed_lead,
     remove_distributed_lead,
 )
 from kommo import set_kommo_responsible, lead_confirmed_missing
 from notifications import notify_admins, notify_admin_error, edit_msg, remove_from_others, schedule_cleanup, schedule_delete_msg, remove_buttons_for_manager, safe_answer as _safe_answer
-from queue_logic import assign_next, day_key, build_keyboard, restore_buttons_for_manager, handle_manager_exit
+from queue_logic import assign_next, day_key, build_keyboard, restore_buttons_for_manager, handle_manager_exit, resolve_max_leads
 from sheets import fetch_managers_async, get_block_reason
 
 logger = logging.getLogger(__name__)
@@ -122,7 +122,7 @@ async def on_work_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if active:
         managers = await fetch_managers_async()
-        if user_id not in managers:
+        if user_id not in managers and user_id not in await get_all_forced():
             reason = await get_block_reason(user_id) or "❌ Ви не можете увійти в чергу. Зверніться до керівника."
             await update.message.reply_text(reason, reply_markup=MANAGER_KB)
             await set_availability(user_id, False, reason='blocked')
@@ -210,17 +210,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     managers = await fetch_managers_async()
-    mgr_name = managers.get(manager_id, {}).get('name', query.from_user.first_name or manager_id)
+    forced   = await get_all_forced()
+    mgr_name = managers.get(manager_id, {}).get('name') or state.MANAGERS_BY_ID.get(manager_id) or query.from_user.first_name or manager_id
 
     try:
         if action in ('take', 't'):
-            if not await is_available(manager_id) or manager_id not in managers:
+            if not await is_available(manager_id) or (manager_id not in managers and manager_id not in forced):
                 await _safe_answer(query, "⛔ Ви поза чергою — заявку взяти неможливо", show_alert=True)
                 return
 
-            mgr_info  = managers.get(manager_id, {})
             overrides = await get_all_max_leads_overrides()
-            max_leads = overrides[manager_id] if manager_id in overrides else mgr_info.get('max_leads')
+            max_leads = resolve_max_leads(manager_id, managers, overrides, forced)
 
             if max_leads is not None:
                 taken_today = await get_taken(manager_id, day_key())

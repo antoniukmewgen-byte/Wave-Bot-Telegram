@@ -25,6 +25,7 @@ from db import (
     get_all_distributed_leads,
     transfer_taken, get_connected, get_managers_dict, get_all_exit_reasons, get_status_chats,
     get_all_held_leads, remove_held_lead, add_held_lead,
+    get_all_forced, clear_forced,
 )
 from phone_timezone import is_client_morning, resolve_client_timezone
 from notifications import (
@@ -113,18 +114,18 @@ async def build_manager_status_text(managers: dict) -> str:
     taken_map     = await get_all_taken(month)
     sent_map      = await _build_sent_map()
     exit_reasons  = await get_all_exit_reasons()
+    forced        = await get_all_forced()
 
     lines = ["👥 <b>Статус менеджерів:</b>\n"]
     for name, tg_id in (await get_managers_dict()).items():
-        if tg_id not in managers:
+        if tg_id not in managers and tg_id not in forced:
             continue
         if tg_id not in connected_ids:
             lines.append(f"(КОРИСТУВАЧ ❌) {name} — ще не підключився")
             continue
         taken     = taken_map.get(tg_id, 0)
-        info      = managers.get(tg_id, {})
-        max_leads = overrides[tg_id] if tg_id in overrides else info.get('max_leads')
-        lim_mark  = " ✏️" if tg_id in overrides else ""
+        max_leads = resolve_max_leads(tg_id, managers, overrides, forced)
+        lim_mark  = " ✏️" if tg_id in overrides else (" 🔓" if tg_id in forced else "")
         limit_str = '∞' if max_leads is None else f"{max_leads}{lim_mark}"
         at_limit  = max_leads is not None and taken >= max_leads
         is_active = avail_map.get(tg_id, False)
@@ -165,6 +166,17 @@ async def broadcast_manager_status():
             logger.warning(f"broadcast_manager_status: не вдалось надіслати в чат {chat_id}: {e}")
 
 
+def resolve_max_leads(tg_id: str, managers: dict, overrides: dict, forced: dict) -> Optional[int]:
+    """Ліміт лідів/день для менеджера з урахуванням пріоритету:
+    ручний override (⚙️ Ліміти) > дані з таблиці (fetch_managers) > форс-ліміт
+    (для менеджера, якого fetch_managers виключив, але адмін форсував у чергу)."""
+    if tg_id in overrides:
+        return overrides[tg_id]
+    if tg_id in managers:
+        return managers[tg_id]['max_leads']
+    return forced.get(tg_id)
+
+
 async def sorted_queue(
     managers: dict,
     exclude: list[str] = None,
@@ -172,14 +184,18 @@ async def sorted_queue(
     avail_map: dict = None,
     overrides: dict = None,
     sent_map: dict = None,
+    forced: dict = None,
 ) -> list[str]:
     """
     Повертає список tg_id менеджерів у порядку черги.
     managers — обов'язковий: fetch_managers() тепер async (gspread_asyncio),
     тож синхронно всередині цієї функції отримати його вже не можна;
     виклики нижче й так завжди передають managers явно.
-    Прийняті ззовні taken_map/avail_map/overrides/sent_map дозволяють
+    Прийняті ззовні taken_map/avail_map/overrides/sent_map/forced дозволяють
     уникнути зайвих запитів до БД, якщо черга будується для багатьох лідів підряд.
+    forced — менеджери, яких адмін вручну форсував у чергу попри виключення
+    fetch_managers() (погана конверсія тощо); додаються до кандидатів навіть
+    якщо їх немає в managers.
     """
     if taken_map is None:
         taken_map = await get_all_taken(day_key())
@@ -189,18 +205,20 @@ async def sorted_queue(
         overrides = await get_all_max_leads_overrides()
     if sent_map is None:
         sent_map = await _build_sent_map()
+    if forced is None:
+        forced = await get_all_forced()
 
     exclude = set(exclude or [])
 
     queue = []
-    for tg_id, info in managers.items():
+    for tg_id in set(managers) | set(forced):
         if tg_id in exclude:
             continue
         if not avail_map.get(tg_id, False):
             continue
         taken     = taken_map.get(tg_id, 0)
         pending   = sent_map.get(tg_id, 0)
-        max_leads = overrides[tg_id] if tg_id in overrides else info['max_leads']
+        max_leads = resolve_max_leads(tg_id, managers, overrides, forced)
         if pending > 0:
             continue
         if max_leads is not None and taken >= max_leads:
@@ -234,7 +252,7 @@ async def assign_next(lead_id: str, exclude: list[str] = None):
         return
 
     manager_id   = queue[0]
-    manager_name = managers.get(manager_id, {}).get('name', 'Менеджер')
+    manager_name = managers.get(manager_id, {}).get('name') or state.MANAGERS_BY_ID.get(manager_id, 'Менеджер')
 
     lead = await get_lead(lead_id)
     if not lead:
@@ -272,8 +290,12 @@ async def handle_manager_exit(manager_id: str):
     При виході з черги (вручну або автоматично по розкладу) — видаляє всі активні
     повідомлення менеджера (особисті й broadcast) і, якщо серед них були особисті
     ("sent") заявки, повертає їх у чергу та передає іншому менеджеру —
-    так само як це робить дія 'skip'.
+    так само як це робить дія 'skip'. Заодно знімає ручний "форс" у чергу
+    (якщо адмін форсував менеджера, якого fetch_managers() виключив) — форс
+    діє лише в межах поточної зміни, по виходу з черги вирішувати наново.
     """
+    await clear_forced(manager_id)
+
     rows = await q("""
         SELECT lead_id FROM leads
         WHERE manager_id = ? AND status = 'sent'
@@ -555,12 +577,14 @@ async def _tick():
         avail_map = await get_all_availability()
         overrides = await get_all_max_leads_overrides()
         sent_map  = await _build_sent_map()
+        forced    = await get_all_forced()
         tick_ctx  = dict(
             managers=managers,
             taken_map=taken_map,
             avail_map=avail_map,
             overrides=overrides,
             sent_map=sent_map,
+            forced=forced,
         )
 
         for lead in leads:
