@@ -3,6 +3,7 @@ HTTP-рівневі тести для kommo.py: перевіряють ретр�
 помилок безпосередньо на рівні aiohttp-запитів (без реального звернення до Kommo API).
 """
 import re
+import time
 
 import pytest
 from aioresponses import aioresponses
@@ -25,8 +26,26 @@ async def _kommo_test_env(monkeypatch):
     """Вмикає AMO_TOKEN (без нього всі функції одразу виходять) і чистить сесію
     aiohttp між тестами, щоб aioresponses завжди перехоплював свіжі запити."""
     monkeypatch.setattr(kommo, 'AMO_TOKEN', 'test-token')
+    kommo._request_times.clear()  # ізоляція глобального rate-limiter між тестами
     yield
     await kommo.close_session()
+
+
+# ─── _throttle: глобальний rate-limiter (захист від бану IP за перевищення 7/сек) ──
+
+async def test_throttle_allows_burst_up_to_limit_without_delay():
+    start = time.monotonic()
+    for _ in range(kommo._RATE_LIMIT):
+        await kommo._throttle()
+    assert time.monotonic() - start < 0.5
+
+
+async def test_throttle_delays_requests_beyond_limit():
+    start = time.monotonic()
+    for _ in range(kommo._RATE_LIMIT + 1):
+        await kommo._throttle()
+    # (_RATE_LIMIT+1)-й запит має почекати, доки не спливе секунда від першого
+    assert time.monotonic() - start >= 1.0
 
 
 # ─── get_kommo_users ──────────────────────────────────────────────────────────

@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import time
+from collections import deque
 from datetime import datetime
 from typing import Optional
 
@@ -53,6 +55,42 @@ async def close_session():
     _session = None
 
 
+# ─── Глобальний тротлінг запитів до Kommo ────────────────────────────────────
+# Kommo офіційно обмежує API до 7 запитів/сек НА IP; при повторному
+# перевищенні (429) IP банять — усі наступні запити повертають 403 на БУДЬ-ЯКИЙ
+# ендпоінт, поки бан не знімуть (джерело: developers.kommo.com/docs/limitations).
+# Саме так і сталось на проді 2026-09-21: паралельні вебхуки + щохвилинні
+# scheduler-джоби (_release_held_leads, resweep_active_leads_for_client_time,
+# on_lead_distributed) незалежно один від одного смикали Kommo API через
+# спільну сесію з TCPConnector(limit=20) — без жодного спільного тротлінгу
+# сумарна швидкість могла легко перевищити 7/сек і призвести до бану IP.
+#
+# retry/backoff на 429 (нижче) реагує вже ПІСЛЯ порушення ліміту — цей тротлер
+# запобігає порушенню заздалегідь, гарантуючи, що сумарна швидкість запитів
+# з усіх паралельних викликів фізично не може перевищити ліміт.
+_RATE_LIMIT = 6  # трохи нижче за офіційні 7/сек — запас на мережевий джиттер
+_rate_lock: Optional[asyncio.Lock] = None
+_request_times: deque = deque()  # monotonic-мітки часу останніх запитів (макс. _RATE_LIMIT штук)
+
+
+async def _throttle():
+    global _rate_lock
+    if _rate_lock is None:
+        _rate_lock = asyncio.Lock()
+    async with _rate_lock:
+        now = time.monotonic()
+        while _request_times and now - _request_times[0] >= 1.0:
+            _request_times.popleft()
+        if len(_request_times) >= _RATE_LIMIT:
+            wait = 1.0 - (now - _request_times[0])
+            if wait > 0:
+                await asyncio.sleep(wait)
+            now = time.monotonic()
+            while _request_times and now - _request_times[0] >= 1.0:
+                _request_times.popleft()
+        _request_times.append(now)
+
+
 def make_lead_title(status_id: str, lead_id: str) -> str:
     raw_label = HOT_STATUSES.get(str(status_id), 'Нова заявка')
     if 'Гаряча' in raw_label:
@@ -73,6 +111,7 @@ async def get_kommo_users() -> list:
     headers = {"Authorization": f"Bearer {AMO_TOKEN}"}
     try:
         session = await _get_session()
+        await _throttle()
         async with session.get(url, headers=headers) as resp:
             if resp.status != 200:
                 logger.error(f"get_kommo_users: HTTP {resp.status}")
@@ -152,6 +191,7 @@ async def _fetch_lead_info(lead_id: str) -> dict:
     url     = f"https://{AMO_SUBDOMAIN}.kommo.com/api/v4/leads/{lead_id}"
     headers = {"Authorization": f"Bearer {AMO_TOKEN}"}
     session = await _get_session()
+    await _throttle()
     async with session.get(url, headers=headers) as resp:
         if resp.status == 429:
             raise _KommoRateLimited(int(resp.headers.get('Retry-After', 5)))
@@ -265,6 +305,7 @@ async def _get_entity_phone(entity: str, entity_id) -> Optional[str]:
     headers = {"Authorization": f"Bearer {AMO_TOKEN}"}
     try:
         session = await _get_session()
+        await _throttle()
         async with session.get(url, headers=headers) as resp:
             if resp.status != 200:
                 logger.error(f"_get_entity_phone: HTTP {resp.status} для {entity}/{entity_id}")
@@ -291,6 +332,7 @@ async def get_lead_phone(lead_id: str) -> Optional[str]:
     params  = {"with": "contacts,company"}
     try:
         session = await _get_session()
+        await _throttle()
         async with session.get(url, headers=headers, params=params) as resp:
             if resp.status != 200:
                 logger.error(f"get_lead_phone: HTTP {resp.status} для заявки {lead_id}")
@@ -330,6 +372,7 @@ async def set_kommo_responsible(lead_id: str, manager_id: str) -> bool:
     headers = {"Authorization": f"Bearer {AMO_TOKEN}", "Content-Type": "application/json"}
     try:
         session = await _get_session()
+        await _throttle()
         async with session.patch(url, json=payload, headers=headers) as resp:
             if resp.status not in (200, 202, 204):
                 body = await resp.text()
@@ -351,6 +394,7 @@ async def set_kommo_responsible(lead_id: str, manager_id: str) -> bool:
 )
 async def _fetch_leads_page(session, url, headers, params) -> Optional[dict]:
     """Один запит сторінки лідів. None означає HTTP 204 (природний кінець пагінації)."""
+    await _throttle()
     async with session.get(url, headers=headers, params=params) as resp:
         if resp.status == 204:
             return None
