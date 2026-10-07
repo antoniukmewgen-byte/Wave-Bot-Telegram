@@ -19,7 +19,7 @@ from sheets import warmup
 from webhook import router as webhook_router
 
 from handlers.manager import on_start, on_work, on_work_button, on_callback
-from handlers.admin import on_admin_button, on_statuschat_toggle
+from handlers.admin import on_admin_button, on_statuschat_toggle, on_add_admin, on_del_admin, on_list_admins
 from handlers.conversations import (
     LIMIT_SELECT, LIMIT_INPUT, limits_start, limits_select, limits_input, limits_cancel,
     SCHED_SELECT, SCHED_DAYS, SCHED_TIME, SCHED_END_TIME,
@@ -28,6 +28,8 @@ from handlers.conversations import (
     reg_start, reg_select_sheet, reg_select_kommo,
     FORCE_SELECT, FORCE_INPUT,
     force_start, force_select, force_input, force_cancel,
+    ADMINS_SELECT, ADMINS_INPUT,
+    admins_start, admins_select, admins_input, admins_cancel,
 )
 from handlers.admin_callbacks import on_admin_callback
 
@@ -43,6 +45,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(fastapi: FastAPI):
     await init_db()
     await state.reload_managers()
+    await state.reload_admins()
     await init_default_schedules(await get_managers_dict())
 
     state._app = (
@@ -122,6 +125,20 @@ async def lifespan(fastapi: FastAPI):
         name='force_conversation',
     ))
 
+    _admins_entry = MessageHandler(filters.TEXT & filters.Regex(r'^👑 Адміни$'), admins_start)
+    app.add_handler(ConversationHandler(
+        entry_points=[_admins_entry],
+        states={
+            ADMINS_SELECT: [CallbackQueryHandler(admins_select, pattern=r'^adm:'), _admins_entry],
+            ADMINS_INPUT:  [_admins_entry, MessageHandler(filters.TEXT & ~filters.COMMAND, admins_input)],
+        },
+        fallbacks=[CommandHandler('cancel', admins_cancel)],
+        per_user=True,
+        allow_reentry=True,
+        persistent=True,
+        name='admins_conversation',
+    ))
+
     app.add_handler(CallbackQueryHandler(
         on_callback,
         pattern=r'^(?!reg:|reg_sheet:|reg_kommo:|mgr_approve:|mgr_reject:)',
@@ -129,6 +146,9 @@ async def lifespan(fastapi: FastAPI):
     app.add_handler(CommandHandler('start', on_start))
     app.add_handler(CommandHandler('work', on_work))
     app.add_handler(CommandHandler(['statuson', 'statusoff'], on_statuschat_toggle))
+    app.add_handler(CommandHandler('addadmin', on_add_admin))
+    app.add_handler(CommandHandler('deladmin', on_del_admin))
+    app.add_handler(CommandHandler('admins', on_list_admins))
     app.add_handler(MessageHandler(
         filters.TEXT & filters.Regex(r'^(✅ Увійти в чергу|🚫 Вийти з черги)$'),
         on_work_button,

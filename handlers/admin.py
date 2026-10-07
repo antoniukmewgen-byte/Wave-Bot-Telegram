@@ -6,12 +6,13 @@ from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 import state
-from config import ADMIN_IDS, AMO_PIPELINE_ID, AMO_HOT_STATUS_ID, WEBHOOK_PATH, AMO_TOKEN
+from config import ADMIN_IDS, ROOT_ADMIN_IDS, AMO_PIPELINE_ID, AMO_HOT_STATUS_ID, WEBHOOK_PATH, AMO_TOKEN
 from db import (
     q, get_all_taken, get_all_availability, get_all_max_leads_overrides, get_all_forced,
     get_all_exit_reasons, get_connected, get_managers_dict, get_all_managers,
     get_pending_managers, approve_manager, delete_manager,
     add_status_chat, remove_status_chat,
+    add_admin, remove_admin,
 )
 from kommo import sync_from_kommo
 from notifications import send_long, notify_admin_error
@@ -32,7 +33,7 @@ ADMIN_KB = ReplyKeyboardMarkup(
         [KeyboardButton("⏰ Розклади"),           KeyboardButton("🔍 Діагностика")],
         [KeyboardButton("👤 Менеджери"),          KeyboardButton("🧹 Прибрати привиди")],
         [KeyboardButton("📡 Перевірити на зв'язку"), KeyboardButton("🌙 Звірити ранкові ліди")],
-        [KeyboardButton("🔓 Заблоковані")],
+        [KeyboardButton("🔓 Заблоковані"),       KeyboardButton("👑 Адміни")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -73,6 +74,70 @@ async def on_statuschat_toggle(update: Update, context: ContextTypes.DEFAULT_TYP
     elif command == 'statusoff':
         await remove_status_chat(chat_id)
         await update.message.reply_text("🔕 Розсилку статусу менеджерів для цього чату вимкнено.")
+
+
+async def on_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/addadmin <telegram_id> — додає нового адміна без правок .env і перезапуску."""
+    user_id = str(update.effective_user.id)
+    if user_id not in ADMIN_IDS:
+        return
+
+    args = context.args
+    if not args or not args[0].strip().lstrip('-').isdigit():
+        await update.message.reply_text(
+            "Використання: <code>/addadmin telegram_id</code>\n"
+            "Дізнатись telegram_id користувача можна, напр., через @userinfobot.",
+            parse_mode='HTML',
+        )
+        return
+
+    new_id = args[0].strip()
+    if new_id in ADMIN_IDS:
+        await update.message.reply_text("⚠️ Цей користувач уже адмін.")
+        return
+
+    await add_admin(new_id, added_by=user_id)
+    ADMIN_IDS.append(new_id)
+    await update.message.reply_text(f"✅ Додано адміна: <code>{new_id}</code>", parse_mode='HTML')
+
+
+async def on_del_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/deladmin <telegram_id> — прибирає адміна, доданого раніше через /addadmin."""
+    user_id = str(update.effective_user.id)
+    if user_id not in ADMIN_IDS:
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text("Використання: <code>/deladmin telegram_id</code>", parse_mode='HTML')
+        return
+
+    target_id = args[0].strip()
+    if target_id in ROOT_ADMIN_IDS:
+        await update.message.reply_text(
+            "❌ Цей адмін заданий у .env на сервері — видалити його можна лише там."
+        )
+        return
+    if target_id not in ADMIN_IDS:
+        await update.message.reply_text("⚠️ Цей ID не в списку адмінів.")
+        return
+
+    await remove_admin(target_id)
+    ADMIN_IDS.remove(target_id)
+    await update.message.reply_text(f"✅ Видалено адміна: <code>{target_id}</code>", parse_mode='HTML')
+
+
+async def on_list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/admins — показує поточний список адмінів."""
+    user_id = str(update.effective_user.id)
+    if user_id not in ADMIN_IDS:
+        return
+
+    lines = ["👑 <b>Адміни:</b>\n"]
+    for aid in ADMIN_IDS:
+        mark = "сервер (.env)" if aid in ROOT_ADMIN_IDS else "доданий /addadmin"
+        lines.append(f"• <code>{aid}</code> — {mark}")
+    await update.message.reply_text('\n'.join(lines), parse_mode='HTML')
 
 
 async def _handle_connections(message):

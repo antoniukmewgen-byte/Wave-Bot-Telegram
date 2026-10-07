@@ -5,11 +5,12 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes, ConversationHandler
 
 import state
-from config import ADMIN_IDS
+from config import ADMIN_IDS, ROOT_ADMIN_IDS
 from db import (
     get_all_max_leads_overrides, get_all_schedules, set_max_leads_override, set_schedule,
     get_managers_dict, upsert_manager, get_manager, get_all_managers,
     get_all_forced, set_forced, clear_forced, set_availability,
+    add_admin, remove_admin,
 )
 from notifications import safe_answer
 from sheets import fetch_managers_async, get_all_sheet_names, get_block_reason
@@ -23,6 +24,8 @@ SCHED_SELECT, SCHED_DAYS, SCHED_TIME, SCHED_END_TIME = range(4)
 REG_SELECT_SHEET, REG_SELECT_KOMMO = range(2)
 
 FORCE_SELECT, FORCE_INPUT = range(2)
+
+ADMINS_SELECT, ADMINS_INPUT = range(2)
 
 DAYS_UA = {0: 'Пн', 1: 'Вт', 2: 'Ср', 3: 'Чт', 4: 'Пт', 5: 'Сб', 6: 'Нд'}
 
@@ -234,6 +237,95 @@ async def force_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def force_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    from handlers.admin import ADMIN_KB
+    await update.message.reply_text("❌ Скасовано", reply_markup=ADMIN_KB)
+    return ConversationHandler.END
+
+
+# ─── CONVERSATION: АДМІНИ ─────────────────────────────────────────────────────
+
+async def admins_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ У вас немає доступу до цієї функції.")
+        return ConversationHandler.END
+
+    lines = ["👑 <b>Адміни</b>\n"]
+    buttons = [[InlineKeyboardButton("➕ Додати адміна", callback_data="adm:add")]]
+    for aid in ADMIN_IDS:
+        if aid in ROOT_ADMIN_IDS:
+            lines.append(f"🔒 <code>{aid}</code> — сервер (.env)")
+        else:
+            lines.append(f"👤 <code>{aid}</code> — доданий через бот")
+            buttons.append([InlineKeyboardButton(f"➖ Видалити {aid}", callback_data=f"adm:rm:{aid}")])
+
+    buttons.append([InlineKeyboardButton("❌ Скасувати", callback_data="adm:cancel")])
+    await update.message.reply_text(
+        '\n'.join(lines) + "\n\n<i>🔒 — задані в .env на сервері, видалити можна лише там</i>",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+    return ADMINS_SELECT
+
+
+async def admins_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await safe_answer(query)
+
+    if query.data == "adm:cancel":
+        await query.edit_message_text("❌ Скасовано")
+        return ConversationHandler.END
+
+    if query.data == "adm:add":
+        await query.edit_message_text(
+            "➕ <b>Новий адмін</b>\n\n"
+            "Надішліть telegram_id користувача (дізнатись можна, напр., через @userinfobot).\n"
+            "/cancel — скасувати",
+            parse_mode='HTML',
+        )
+        return ADMINS_INPUT
+
+    tg_id = query.data.split(':', 2)[2]
+    if tg_id in ROOT_ADMIN_IDS:
+        await query.edit_message_text("❌ Цей адмін заданий у .env на сервері — видалити можна лише там.")
+        return ConversationHandler.END
+    if tg_id not in ADMIN_IDS:
+        await query.edit_message_text("⚠️ Цей ID уже не в списку адмінів.")
+        return ConversationHandler.END
+
+    await remove_admin(tg_id)
+    ADMIN_IDS.remove(tg_id)
+    await query.edit_message_text(f"✅ Видалено адміна: <code>{tg_id}</code>", parse_mode='HTML')
+    return ConversationHandler.END
+
+
+async def admins_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ У вас немає доступу до цієї функції.")
+        return ConversationHandler.END
+
+    text = update.message.text.strip()
+    if not text.isdigit():
+        await update.message.reply_text("⚠️ Введіть числовий telegram_id (або /cancel)")
+        return ADMINS_INPUT
+
+    if text in ADMIN_IDS:
+        await update.message.reply_text("⚠️ Цей користувач уже адмін.")
+        return ADMINS_INPUT
+
+    await add_admin(text, added_by=user_id)
+    ADMIN_IDS.append(text)
+
+    from handlers.admin import ADMIN_KB
+    await update.message.reply_text(
+        f"✅ Додано адміна: <code>{text}</code>", parse_mode='HTML', reply_markup=ADMIN_KB,
+    )
+    return ConversationHandler.END
+
+
+async def admins_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     from handlers.admin import ADMIN_KB
     await update.message.reply_text("❌ Скасовано", reply_markup=ADMIN_KB)

@@ -97,6 +97,11 @@ async def _create_tables():
             chat_id    TEXT PRIMARY KEY,
             added_at   REAL
         );
+        CREATE TABLE IF NOT EXISTS admins (
+            tg_id      TEXT PRIMARY KEY,
+            added_by   TEXT,
+            added_at   REAL
+        );
         CREATE TABLE IF NOT EXISTS held_leads (
             lead_id             TEXT PRIMARY KEY,
             title               TEXT,
@@ -517,6 +522,22 @@ async def delete_manager(tg_id: str):
     await q("DELETE FROM schedules WHERE manager_id=?", (tg_id,))
     await q("DELETE FROM availability WHERE manager_id=?", (tg_id,))
     await q("DELETE FROM connected WHERE manager_id=?", (tg_id,))
+
+
+# ─── АДМІНИ (додані через /addadmin, на відміну від ADMIN_IDS з .env) ───────
+
+async def add_admin(tg_id: str, added_by: str = None):
+    await q("INSERT OR IGNORE INTO admins (tg_id, added_by, added_at) VALUES (?,?,?)",
+      (tg_id, added_by, datetime.now().timestamp()))
+
+
+async def remove_admin(tg_id: str):
+    await q("DELETE FROM admins WHERE tg_id=?", (tg_id,))
+
+
+async def get_all_admin_ids() -> list[str]:
+    rows = await q("SELECT tg_id FROM admins", fetch='all')
+    return [r['tg_id'] for r in rows] if rows else []
 
 
 # ─── РОЗПОДІЛЕНІ ЗАЯВКИ ──────────────────────────────────────────────────────

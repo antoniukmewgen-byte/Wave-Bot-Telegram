@@ -64,6 +64,10 @@ SHEETS_ID      = _settings.sheets_id
 SHEET_NAME     = _settings.sheet_name
 GOOGLE_CREDS   = _settings.google_creds
 ADMIN_IDS      = [i.strip() for i in _settings.admin_ids.split(',') if i.strip()]
+# Знімок адмінів із .env — тільки вони "кореневі": /deladmin не може їх видалити
+# (інакше можна лишитись без жодного адміна). Адмінів, доданих через /addadmin,
+# довантажує в ADMIN_IDS state.reload_admins() при старті бота (див. main.py).
+ROOT_ADMIN_IDS = tuple(ADMIN_IDS)
 
 COL_MANAGER    = 0
 COL_YEAR       = 2
