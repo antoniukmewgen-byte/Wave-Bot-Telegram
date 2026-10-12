@@ -99,11 +99,20 @@ async def notify_admin_error(where: str, error: Exception, manager_id: str = Non
 
 
 async def _deactivate_blocked(manager_id: str):
+    """
+    Автоматичний аналог ручного видалення менеджера (mgr_delyes в
+    admin_callbacks.py) — спрацьовує, коли Telegram кидає Forbidden
+    (менеджер заблокував бота). Робить те саме, що й ручне видалення:
+    спершу handle_manager_exit (повертає особисті "sent" заявки в чергу
+    іншим і прибирає повідомлення), інакше вони лишались би "привидами"
+    на вже видаленому менеджері аж до ручного "🧹 Прибрати привиди".
+    """
     name = state.MANAGERS_BY_ID.get(manager_id, manager_id)
+    from queue_logic import handle_manager_exit  # локальний імпорт — queue_logic сам імпортує з notifications
+    await handle_manager_exit(manager_id)
     await delete_manager(manager_id)
     await set_availability(manager_id, False, reason='bot_blocked')
-    # Видаляємо з MANAGERS_BY_ID щоб назва не залишалась у пам'яті
-    state.MANAGERS_BY_ID.pop(manager_id, None)
+    await state.reload_managers()
     logger.warning(f"{name} ({manager_id}) заблокував бота — видалено з бота")
     await notify_admins(
         f"🔕 <b>{name}</b> заблокував бота — видалено з системи.\n"
