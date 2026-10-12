@@ -77,8 +77,8 @@ async def lifespan(fastapi: FastAPI):
         name='registration_conversation',
     ))
 
-    # ── Адміністративні колбеки (схвалення менеджерів тощо) ─────────────────
-    app.add_handler(CallbackQueryHandler(on_admin_callback, pattern=r'^mgr_(approve|reject):'))
+    # ── Адміністративні колбеки (схвалення/видалення менеджерів тощо) ───────
+    app.add_handler(CallbackQueryHandler(on_admin_callback, pattern=r'^mgr_(approve|reject|del|delyes|delno):'))
 
     _lim_entry = MessageHandler(filters.TEXT & filters.Regex(r'^⚙️ Ліміти$'), limits_start)
     app.add_handler(ConversationHandler(
@@ -141,7 +141,7 @@ async def lifespan(fastapi: FastAPI):
 
     app.add_handler(CallbackQueryHandler(
         on_callback,
-        pattern=r'^(?!reg:|reg_sheet:|reg_kommo:|mgr_approve:|mgr_reject:)',
+        pattern=r'^(?!reg:|reg_sheet:|reg_kommo:|mgr_approve:|mgr_reject:|mgr_del:|mgr_delyes:|mgr_delno:)',
     ))
     app.add_handler(CommandHandler('start', on_start))
     app.add_handler(CommandHandler('work', on_work))

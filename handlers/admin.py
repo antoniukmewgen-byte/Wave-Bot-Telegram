@@ -546,7 +546,7 @@ async def _handle_resweep_morning(message):
 
 
 async def _handle_managers_list(message):
-    """Показує список всіх менеджерів у БД та заявки на схвалення."""
+    """Показує список всіх менеджерів у БД, заявки на схвалення та кнопки видалення схвалених."""
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
     all_mgrs  = await get_all_managers(approved_only=False)
@@ -571,14 +571,18 @@ async def _handle_managers_list(message):
             f"Kommo: {m['kommo_id'] or '?'} | ID: <code>{m['tg_id']}</code>"
         )
 
-    if pending:
-        buttons = []
-        for m in pending:
-            name = m['sheet_name'] or m['tg_name']
-            buttons.append([
-                InlineKeyboardButton(f"✅ {name}", callback_data=f"mgr_approve:{m['tg_id']}"),
-                InlineKeyboardButton(f"❌ Відхилити", callback_data=f"mgr_reject:{m['tg_id']}"),
-            ])
+    buttons = []
+    for m in pending:
+        name = m['sheet_name'] or m['tg_name']
+        buttons.append([
+            InlineKeyboardButton(f"✅ {name}", callback_data=f"mgr_approve:{m['tg_id']}"),
+            InlineKeyboardButton(f"❌ Відхилити", callback_data=f"mgr_reject:{m['tg_id']}"),
+        ])
+    for m in approved:
+        name = m['sheet_name'] or m['tg_name']
+        buttons.append([InlineKeyboardButton(f"🗑 Видалити {name}", callback_data=f"mgr_del:{m['tg_id']}")])
+
+    if buttons:
         await message.reply_text(
             '\n'.join(lines), parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup(buttons),
